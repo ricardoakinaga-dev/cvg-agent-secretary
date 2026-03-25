@@ -34,7 +34,7 @@ class ChatwootClient {
     async sendMessage(params) {
         const { conversationId, content, private: isPrivate = false } = params;
         logging_1.logger.info('Sending message to Chatwoot', {
-            conversationId,
+            conversationId: String(conversationId),
             contentLength: content.length,
             isPrivate,
         });
@@ -44,14 +44,14 @@ class ChatwootClient {
                 private: isPrivate,
             });
             logging_1.logger.info('Message sent successfully', {
-                messageId: result.id,
-                conversationId,
+                messageId: String(result.id),
+                conversationId: String(conversationId),
             });
             return result;
         }
         catch (error) {
             logging_1.logger.error('Failed to send message to Chatwoot', error, {
-                conversationId,
+                conversationId: String(conversationId),
             });
             throw error;
         }
@@ -62,7 +62,7 @@ class ChatwootClient {
     async addLabel(conversationId, label) {
         await this.request('POST', `/conversations/${conversationId}/labels`, { labels: [label] });
         logging_1.logger.info('Label added to conversation', {
-            conversationId,
+            conversationId: String(conversationId),
             label,
         });
     }
@@ -76,8 +76,8 @@ class ChatwootClient {
             },
         });
         logging_1.logger.info('Conversation assigned', {
-            conversationId,
-            agentId,
+            conversationId: String(conversationId),
+            agentId: String(agentId),
         });
     }
     /**
@@ -90,7 +90,7 @@ class ChatwootClient {
             },
         });
         logging_1.logger.info('Conversation status updated', {
-            conversationId,
+            conversationId: String(conversationId),
             status,
         });
     }

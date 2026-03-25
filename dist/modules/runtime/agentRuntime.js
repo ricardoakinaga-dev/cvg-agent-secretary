@@ -9,9 +9,11 @@ const uuid_1 = require("uuid");
 const crypto_1 = __importDefault(require("crypto"));
 const redis_1 = require("../../shared/redis");
 const logging_1 = require("../logging");
-const client_1 = require("../openai/client");
-const client_2 = require("../chatwoot/client");
+const router_1 = require("../ai/router");
+const client_1 = require("../chatwoot/client");
 const retrieval_1 = require("../knowledge/retrieval");
+const index_1 = require("../analytics/index");
+const service_1 = require("../audit/service");
 const contextLoader_1 = require("../conversations/contextLoader");
 const normalizer_1 = require("../chatwoot/normalizer");
 /**
@@ -27,6 +29,7 @@ function generateMessageHash(conversationId, messageId, content) {
  * Process a Chatwoot webhook event
  */
 async function processWebhookEvent(payload) {
+    const startTime = Date.now();
     const correlationId = (0, uuid_1.v4)();
     const log = logging_1.logger.child({ correlationId });
     log.info('Received webhook event', {
@@ -48,6 +51,12 @@ async function processWebhookEvent(payload) {
         log.info('Message normalized', {
             messageId: normalizedMessage.messageId,
             chatwootMessageId: normalizedMessage.chatwootMessageId,
+        });
+        // Track analytics event
+        await index_1.analyticsService.trackEvent({
+            eventType: 'message_received',
+            conversationId: normalizedMessage.conversationId,
+            contactId: normalizedMessage.contactId,
         });
         // Step 3: Check for duplicates
         const messageHash = generateMessageHash(payload.conversation.id, payload.message.id, payload.message.content);
@@ -105,20 +114,40 @@ async function processWebhookEvent(payload) {
             knowledge: knowledgeResults,
         };
         // Store contactId in context for tool usage
-        context.contactId = memoryContext.contactId;
-        // Step 8: Call OpenAI to generate response
-        log.info('Calling OpenAI', { contactName: metadata.contactName });
+        const contextWithContact = context;
+        contextWithContact.contactId = memoryContext.contactId ?? context.contactId;
+        // Step 8: Call AI to generate response
+        log.info('Calling AI', { contactName: metadata.contactName, provider: router_1.aiRouter.getPrimaryProvider() });
         let agentResponse;
         try {
-            agentResponse = await client_1.openaiClient.generateResponse(normalizedMessage.content, agentContext);
+            const aiResponse = await router_1.aiRouter.generate({
+                message: normalizedMessage.content,
+                context: agentContext
+            });
+            agentResponse = {
+                content: aiResponse.content,
+                confidence: aiResponse.confidence,
+                action: aiResponse.action,
+            };
         }
         catch (error) {
-            log.error('OpenAI error, using fallback', error);
+            log.error('AI error, using fallback', error);
             agentResponse = {
                 content: 'Peço desculpas, estou tendo dificuldades para processar sua solicitação. Um de nossos atendentes logoirá ajudá-lo.',
                 confidence: 0,
-                action: { type: 'fallback', reason: 'openai_error' },
+                action: { type: 'fallback', reason: 'ai_error' },
             };
+            // Track fallback event
+            await index_1.analyticsService.trackEvent({
+                eventType: 'fallback_triggered',
+                conversationId: context.conversationId,
+                contactId: context.contactId,
+                provider: router_1.aiRouter.getPrimaryProvider(),
+                metadata: {
+                    reason: 'ai_error',
+                    error: error.message,
+                },
+            });
         }
         log.info('Agent response generated', {
             contentLength: agentResponse.content.length,
@@ -126,14 +155,61 @@ async function processWebhookEvent(payload) {
         });
         // Step 10: Send response to Chatwoot
         try {
-            await client_2.chatwootClient.sendMessage({
+            await client_1.chatwootClient.sendMessage({
                 conversationId: context.chatwootConversationId,
                 content: agentResponse.content,
             });
             log.info('Response sent to Chatwoot');
+            // Track analytics event
+            await index_1.analyticsService.trackEvent({
+                eventType: 'response_sent',
+                conversationId: context.conversationId,
+                contactId: context.contactId,
+                latency: Date.now() - startTime,
+                metadata: {
+                    confidence: agentResponse.confidence,
+                    action: agentResponse.action?.type,
+                },
+            });
+            // Track handoff if action requires it
+            if (agentResponse.action?.type === 'handoff') {
+                await index_1.analyticsService.trackEvent({
+                    eventType: 'handoff_triggered',
+                    conversationId: context.conversationId,
+                    contactId: context.contactId,
+                    outcome: 'handoff_to_human',
+                    metadata: {
+                        reason: agentResponse.action.reason || 'ai_requested',
+                        summary: agentResponse.action.summary,
+                    },
+                });
+                // Audit trail for handoff
+                await service_1.auditService.recordEvent({
+                    eventType: 'handoff_triggered',
+                    actor: 'system',
+                    resourceType: 'conversation',
+                    resourceId: context.conversationId,
+                    action: 'handoff',
+                    details: {
+                        reason: agentResponse.action.reason || 'ai_requested',
+                        contactId: context.contactId,
+                        summary: agentResponse.action.summary,
+                    },
+                });
+            }
         }
         catch (error) {
             log.error('Failed to send response to Chatwoot', error);
+            // Track error
+            await index_1.analyticsService.trackEvent({
+                eventType: 'error_occurred',
+                conversationId: context.conversationId,
+                contactId: context.contactId,
+                metadata: {
+                    errorType: 'chatwoot_send_failed',
+                    error: error.message,
+                },
+            });
             // Don't throw - we don't want to retry the whole flow
         }
         log.info('Webhook processing completed', {
@@ -156,8 +232,14 @@ async function processConversationCreated(payload) {
         conversationId: String(payload.conversation.id),
         contactName: payload.conversation.contact.name,
     });
-    // Just load/create context - don't generate response
+    // Track conversation started
     const metadata = (0, normalizer_1.extractConversationMetadata)(payload);
+    await index_1.analyticsService.trackEvent({
+        eventType: 'conversation_started',
+        conversationId: metadata.conversationId,
+        contactId: metadata.contactId,
+    });
+    // Just load/create context - don't generate response
     await (0, contextLoader_1.loadConversationContext)(metadata.conversationId, metadata.chatwootConversationId, metadata.contactId, metadata.chatwootContactId, metadata.contactName, metadata.inboxId, metadata.accountId);
 }
 //# sourceMappingURL=agentRuntime.js.map

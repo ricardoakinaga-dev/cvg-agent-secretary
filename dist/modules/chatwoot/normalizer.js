@@ -12,6 +12,10 @@ function normalizeMessage(payload) {
     if (!payload.message || payload.message.message_type !== 'incoming') {
         return null;
     }
+    // Skip private messages (internal notes)
+    if (payload.message.private) {
+        return null;
+    }
     const message = payload.message;
     // Validate required fields
     if (!message.content && (!message.attachments || message.attachments.length === 0)) {

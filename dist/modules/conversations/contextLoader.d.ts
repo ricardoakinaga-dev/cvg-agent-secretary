@@ -1,4 +1,6 @@
 import { ConversationContext, NormalizedMessage, ConversationState } from '../../shared/types';
+import { Contact } from '../contacts/types';
+import { Pet } from '../pets/types';
 /**
  * Extended context that includes memory information (for LLM context)
  */
@@ -42,8 +44,8 @@ export declare function updateConversationState(context: ConversationContext, ne
  */
 export declare function loadContactAndMemories(chatwootContactId: number, contactName: string): Promise<{
     contactId: string | null;
-    contact: any | null;
+    contact: Contact | null;
     memories: string[];
-    pets: any[];
+    pets: Pet[];
 }>;
 //# sourceMappingURL=contextLoader.d.ts.map

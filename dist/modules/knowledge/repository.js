@@ -1,9 +1,43 @@
 "use strict";
 // Knowledge Repository - Database operations for Knowledge documents and chunks
 // Phase 3: RAG and Institutional Knowledge
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.knowledgeRepository = void 0;
 const db_1 = require("../../shared/db");
+const service_1 = require("../audit/service");
 /**
  * Knowledge Repository
  * Handles all database operations for knowledge documents and chunks
@@ -126,10 +160,12 @@ class KnowledgeRepository {
      * Approve and publish a document
      */
     async publishDocument(id, approvedBy) {
-        // First deactivate old versions
+        const doc = await this.getDocument(id);
+        if (!doc) {
+            throw new Error(`Document not found: ${id}`);
+        }
         await (0, db_1.query)(`UPDATE knowledge_documents SET is_active = false, status = 'approved' 
        WHERE id != $1 AND title = (SELECT title FROM knowledge_documents WHERE id = $1)`, [id]);
-        // Then publish the new version
         const sql = `
       UPDATE knowledge_documents
       SET status = 'published', approved_by = $2, approved_at = NOW(), 
@@ -141,7 +177,29 @@ class KnowledgeRepository {
         if (result.rows.length === 0) {
             throw new Error(`Document not found: ${id}`);
         }
-        return this.mapRowToDocument(result.rows[0]);
+        const publishedDoc = this.mapRowToDocument(result.rows[0]);
+        // Create chunks for the published document
+        try {
+            const { createChunksForDocument } = await Promise.resolve().then(() => __importStar(require('./pipeline')));
+            await createChunksForDocument(publishedDoc);
+        }
+        catch (error) {
+            console.warn('Failed to create chunks for document:', error.message);
+        }
+        // Audit trail for publication
+        await service_1.auditService.recordEvent({
+            eventType: 'knowledge_published',
+            actor: approvedBy,
+            resourceType: 'knowledge_document',
+            resourceId: id,
+            action: 'publish',
+            details: {
+                title: publishedDoc.title,
+                category: publishedDoc.category,
+                version: publishedDoc.version,
+            },
+        });
+        return publishedDoc;
     }
     /**
      * Create a knowledge chunk

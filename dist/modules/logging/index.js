@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.logger = void 0;
 const pino_1 = __importDefault(require("pino"));
 const config_1 = require("../../config");
+const data_masking_1 = require("../../shared/data-masking");
 class Logger {
     logger;
     constructor() {
@@ -22,10 +23,12 @@ class Logger {
         });
     }
     buildContext(context) {
-        return {
+        const base = {
             timestamp: new Date().toISOString(),
             ...context,
         };
+        // Mask sensitive data in logs
+        return (0, data_masking_1.maskObjectForLog)(base);
     }
     debug(message, context) {
         this.logger.debug(this.buildContext(context), message);
@@ -40,7 +43,7 @@ class Logger {
         const errorContext = error
             ? {
                 error: {
-                    message: error.message,
+                    message: (0, data_masking_1.maskSensitiveData)(error.message),
                     stack: error.stack,
                     name: error.name,
                 },

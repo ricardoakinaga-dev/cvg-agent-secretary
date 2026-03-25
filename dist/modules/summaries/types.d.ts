@@ -3,7 +3,7 @@ export interface ConversationSummary {
     conversationId: string;
     summaryText: string;
     keyPoints: string[];
-    extractedFacts: Record<string, any>[];
+    extractedFacts: Record<string, unknown>[];
     intent: string | null;
     sentiment: string | null;
     needsHandoff: boolean;
@@ -16,7 +16,7 @@ export interface CreateSummaryInput {
     conversationId: string;
     summaryText: string;
     keyPoints?: string[];
-    extractedFacts?: Record<string, any>[];
+    extractedFacts?: Record<string, unknown>[];
     intent?: string;
     sentiment?: string;
     needsHandoff?: boolean;
@@ -29,7 +29,7 @@ export interface SummaryRow {
     conversation_id: string;
     summary_text: string;
     key_points: string[];
-    extracted_facts: Record<string, any>[];
+    extracted_facts: Record<string, unknown>[];
     intent: string | null;
     sentiment: string | null;
     needs_handoff: boolean;

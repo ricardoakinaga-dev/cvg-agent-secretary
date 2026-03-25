@@ -40,7 +40,7 @@ const URGENCY_INDICATORS = [
         riskLevel: 'high',
     },
     {
-        pattern: /(?:meu|me|a) (?:pet|cachorro|gato|animal)\s+(?:não\s+)?(?:consegue|movement|mover)\s+andar/i,
+        pattern: /(?:meu|me|a) (?:pet|cachorro|gato|animal)\s+(?:não\s+)?(?:consegue|mover|levantar)\s+andar/i,
         priority: 'critical',
         requiresHandoff: true,
         handoffReason: 'Emergência clínica - não consegue andar',
@@ -138,7 +138,7 @@ const HUMAN_REQUEST_PATTERNS = [
     /quero\s+(?:falar|ser\s+atendido)\s+com\s+(?:humano|pessoa|atendente)/i,
     /mande\s+(?:um|uma)\s+(?:humano|pessoa|atendente)/i,
     /pode\s+chamar\s+(?:um|uma)\s+(?:atendente|humano)/i,
-    /quero\s+ falar\s+com\s+(?:você\s+)?(?:não\s+)?(?:é|é\s+so)/i,
+    /quero\s+falar\s+com\s+(?:humano|atendente)/i,
     /atendente\s+humano/i,
     /human[oa]/i,
 ];

@@ -120,6 +120,44 @@ class RedisClient {
             return false;
         }
     }
+    // Embedding cache methods
+    async getEmbeddingCache(text) {
+        const hash = this.hashText(text);
+        const key = `embedding:cache:${hash}`;
+        const data = await this.getClient().get(key);
+        if (data) {
+            return JSON.parse(data);
+        }
+        return null;
+    }
+    async setEmbeddingCache(text, embedding, ttlSeconds = 604800) {
+        const hash = this.hashText(text);
+        const key = `embedding:cache:${hash}`;
+        await this.getClient().setex(key, ttlSeconds, JSON.stringify(embedding));
+    }
+    async getEmbeddingCacheStats() {
+        const client = this.getClient();
+        const keys = await client.keys('embedding:cache:*');
+        const info = await client.info('stats');
+        return {
+            keys: keys.length,
+            hits: this.parseInfoMetric(info, 'keyspace_hits') || 0,
+            misses: this.parseInfoMetric(info, 'keyspace_misses') || 0,
+        };
+    }
+    hashText(text) {
+        let hash = 0;
+        for (let i = 0; i < text.length; i++) {
+            const char = text.charCodeAt(i);
+            hash = ((hash << 5) - hash) + char;
+            hash = hash & hash;
+        }
+        return Math.abs(hash).toString(36);
+    }
+    parseInfoMetric(info, metric) {
+        const match = info.match(new RegExp(`${metric}:(\\d+)`));
+        return match ? parseInt(match[1], 10) : null;
+    }
 }
 exports.redisClient = new RedisClient();
 //# sourceMappingURL=redis.js.map

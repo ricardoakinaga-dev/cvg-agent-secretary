@@ -9,6 +9,7 @@ export interface DatabaseConfig {
 }
 export interface AppConfig {
     nodeEnv: string;
+    isProduction: boolean;
     port: number;
     database: DatabaseConfig;
     redis: {
@@ -21,6 +22,11 @@ export interface AppConfig {
         maxTokens: number;
         temperature: number;
     };
+    openrouter?: {
+        apiKey?: string;
+        model?: string;
+    };
+    aiProvider: 'openai' | 'openrouter' | 'auto';
     chatwoot: {
         apiUrl: string;
         apiToken: string;
@@ -32,5 +38,9 @@ export interface AppConfig {
     };
 }
 export declare const config: AppConfig;
-export declare function validateConfig(): boolean;
+export declare function validateConfig(): {
+    valid: boolean;
+    errors: string[];
+};
+export declare function getSafeConfig(): Record<string, unknown>;
 //# sourceMappingURL=index.d.ts.map

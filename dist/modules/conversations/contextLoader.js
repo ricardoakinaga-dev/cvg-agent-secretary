@@ -146,12 +146,7 @@ async function loadContactAndMemories(chatwootContactId, contactName) {
         const pets = await repository_2.petRepository.find({ contactId: contact.id });
         return {
             contactId: contact.id,
-            contact: {
-                id: contact.id,
-                name: contact.name,
-                email: contact.email,
-                phone: contact.phone,
-            },
+            contact: contact,
             memories,
             pets,
         };

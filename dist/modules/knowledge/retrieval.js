@@ -7,6 +7,8 @@ exports.KnowledgeRetrievalService = exports.knowledgeRetrievalService = void 0;
 const logging_1 = require("../logging");
 const client_1 = require("../openai/client");
 const repository_1 = require("./repository");
+const metrics_1 = require("../../shared/metrics");
+const redis_1 = require("../../shared/redis");
 /**
  * Default retrieval configuration
  */
@@ -26,7 +28,7 @@ class PostgresFullTextStore {
     async initialize() {
         logging_1.logger.info('PostgreSQL full-text store initialized (fallback mode)');
     }
-    async addChunks(_chunks) {
+    async addChunks() {
         // Chunks are added via repository
         logging_1.logger.debug('Chunks managed via repository, not vector store');
     }
@@ -108,8 +110,32 @@ class KnowledgeRetrievalService {
         try {
             let results = [];
             if (this.useVectorStore) {
-                // Use vector store for semantic search
-                const embedding = await client_1.openaiClient.generateEmbedding(query);
+                // Check embedding cache first
+                let embedding = null;
+                try {
+                    embedding = await redis_1.redisClient.getEmbeddingCache(query);
+                    if (embedding) {
+                        metrics_1.metrics.incrementCounter(metrics_1.METRICS.KNOWLEDGE_SEARCH_TOTAL, { cache: 'hit' });
+                        logging_1.logger.debug('Embedding cache hit', { query: query.substring(0, 50) });
+                    }
+                    else {
+                        metrics_1.metrics.incrementCounter(metrics_1.METRICS.KNOWLEDGE_SEARCH_TOTAL, { cache: 'miss' });
+                        logging_1.logger.debug('Embedding cache miss', { query: query.substring(0, 50) });
+                    }
+                }
+                catch (cacheError) {
+                    logging_1.logger.warn('Embedding cache read failed', { error: cacheError.message });
+                }
+                // Generate embedding if not cached
+                if (!embedding) {
+                    embedding = await client_1.openaiClient.generateEmbedding(query);
+                    try {
+                        await redis_1.redisClient.setEmbeddingCache(query, embedding);
+                    }
+                    catch (cacheError) {
+                        logging_1.logger.warn('Embedding cache write failed', { error: cacheError.message });
+                    }
+                }
                 results = await this.vectorStore.search(query, embedding, {
                     limit,
                     minRelevance,
@@ -145,9 +171,11 @@ class KnowledgeRetrievalService {
         }
         catch (error) {
             logging_1.logger.error('Knowledge search failed', error, { query });
+            metrics_1.metrics.incrementCounter(metrics_1.METRICS.KNOWLEDGE_SEARCH_ERRORS, { error: 'search_failed' });
             // Try fallback to full-text search if vector store failed
             if (this.useVectorStore) {
                 logging_1.logger.info('Attempting fallback to full-text search');
+                metrics_1.metrics.incrementCounter(metrics_1.METRICS.KNOWLEDGE_FALLBACK_USED);
                 try {
                     const fallbackResults = await repository_1.knowledgeRepository.searchChunksFullText({
                         query,
@@ -166,6 +194,7 @@ class KnowledgeRetrievalService {
                 }
                 catch (fallbackError) {
                     logging_1.logger.error('Fallback search also failed', fallbackError);
+                    metrics_1.metrics.incrementCounter(metrics_1.METRICS.KNOWLEDGE_SEARCH_ERRORS, { error: 'fallback_failed' });
                 }
             }
             return [];

@@ -7,7 +7,7 @@ export interface Memory {
     conversationId: string | null;
     category: MemoryCategory;
     key: string;
-    value: Record<string, any>;
+    value: Record<string, unknown>;
     confidence: number;
     source: MemorySource;
     isActive: boolean;
@@ -21,12 +21,12 @@ export interface CreateMemoryInput {
     conversationId?: string;
     category: MemoryCategory;
     key: string;
-    value: Record<string, any>;
+    value: Record<string, unknown>;
     confidence: number;
     source: MemorySource;
 }
 export interface UpdateMemoryInput {
-    value?: Record<string, any>;
+    value?: Record<string, unknown>;
     confidence?: number;
     source?: MemorySource;
     isActive?: boolean;
@@ -53,7 +53,7 @@ export interface MemoryRow {
     conversation_id: string | null;
     category: string;
     key: string;
-    value: Record<string, any>;
+    value: Record<string, unknown>;
     confidence: number;
     source: string;
     is_active: boolean;

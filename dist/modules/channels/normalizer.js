@@ -1,0 +1,111 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.normalizeFromChatwoot = normalizeFromChatwoot;
+exports.normalizeFromTelegram = normalizeFromTelegram;
+exports.normalizeFromWhatsapp = normalizeFromWhatsapp;
+exports.detectChannelType = detectChannelType;
+exports.isValidChannelMessage = isValidChannelMessage;
+const uuid_1 = require("uuid");
+function normalizeFromChatwoot(payload) {
+    if (!payload.message || payload.message.message_type !== 'incoming') {
+        return null;
+    }
+    const message = payload.message;
+    if (!message.content && (!message.attachments || message.attachments.length === 0)) {
+        return null;
+    }
+    return {
+        messageId: (0, uuid_1.v4)(),
+        channel: 'chatwoot',
+        conversationId: payload.conversation.uuid,
+        contactId: payload.conversation.contact.id.toString(),
+        chatwootConversationId: payload.conversation.id,
+        chatwootContactId: payload.conversation.contact.id,
+        content: message.content || '[Mensagem sem texto]',
+        messageType: 'incoming',
+        senderType: 'user',
+        senderName: message.sender.name,
+        senderIdentifier: `chatwoot:${payload.conversation.contact.id}`,
+        timestamp: new Date(),
+        metadata: {
+            inboxId: payload.conversation.inbox_id,
+            accountId: payload.conversation.account_id,
+            private: message.private,
+        },
+        attachments: (message.attachments || []).map(a => ({
+            id: String(a.id),
+            fileUrl: a.external_url || a.file_url,
+            fileName: a.filename,
+            contentType: a.content_type,
+        })),
+    };
+}
+function normalizeFromTelegram(update) {
+    if (!update.message || !update.message.text) {
+        return null;
+    }
+    const msg = update.message;
+    return {
+        messageId: String(update.update_id),
+        channel: 'telegram',
+        conversationId: `telegram:${msg.chat.id}`,
+        contactId: String(msg.from?.id || msg.chat.id),
+        content: msg.text || '',
+        messageType: 'incoming',
+        senderType: 'user',
+        senderName: msg.from?.first_name || msg.chat.first_name,
+        senderIdentifier: `telegram:${msg.from?.id || msg.chat.id}`,
+        timestamp: new Date(msg.date * 1000),
+        metadata: {
+            telegramChatId: msg.chat.id,
+            telegramMessageId: msg.message_id,
+            telegramUsername: msg.from?.username,
+            telegramLanguageCode: msg.from?.language_code,
+        },
+        attachments: [],
+    };
+}
+function normalizeFromWhatsapp(payload) {
+    const entry = payload.entry?.[0];
+    const change = entry?.changes?.[0];
+    const message = change?.value?.messages?.[0];
+    if (!message || !message.text?.body) {
+        return null;
+    }
+    return {
+        messageId: message.id || (0, uuid_1.v4)(),
+        channel: 'whatsapp',
+        conversationId: `whatsapp:${change.value.metadata.phone_number_id}:${message.from}`,
+        contactId: message.from,
+        content: message.text.body,
+        messageType: 'incoming',
+        senderType: 'user',
+        senderName: change.value.contacts?.[0]?.profile?.name,
+        senderIdentifier: `whatsapp:${message.from}`,
+        timestamp: new Date(parseInt(String(message.timestamp), 10) * 1000),
+        metadata: {
+            whatsappPhoneNumberId: change.value.metadata.phone_number_id,
+            waMessageId: message.id,
+        },
+        attachments: [],
+    };
+}
+function detectChannelType(source) {
+    const lower = source.toLowerCase();
+    if (lower.includes('chatwoot'))
+        return 'chatwoot';
+    if (lower.includes('telegram'))
+        return 'telegram';
+    if (lower.includes('whatsapp') || lower.includes('wa'))
+        return 'whatsapp';
+    if (lower.includes('email'))
+        return 'email';
+    return 'unknown';
+}
+function isValidChannelMessage(msg) {
+    return Boolean(msg.messageId &&
+        msg.channel !== 'unknown' &&
+        msg.content &&
+        msg.contactId);
+}
+//# sourceMappingURL=normalizer.js.map

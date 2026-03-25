@@ -15,6 +15,15 @@ declare class RedisClient {
     acquireLock(resourceId: string, ttlSeconds?: number): Promise<boolean>;
     releaseLock(resourceId: string): Promise<void>;
     ping(): Promise<boolean>;
+    getEmbeddingCache(text: string): Promise<number[] | null>;
+    setEmbeddingCache(text: string, embedding: number[], ttlSeconds?: number): Promise<void>;
+    getEmbeddingCacheStats(): Promise<{
+        keys: number;
+        hits: number;
+        misses: number;
+    }>;
+    private hashText;
+    private parseInfoMetric;
 }
 export declare const redisClient: RedisClient;
 export {};

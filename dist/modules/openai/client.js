@@ -7,6 +7,7 @@ exports.openaiClient = void 0;
 const openai_1 = __importDefault(require("openai"));
 const config_1 = require("../../config");
 const logging_1 = require("../logging");
+const metrics_1 = require("../../shared/metrics");
 /**
  * System prompt for the secretary agent
  * Defines persona, behavior, and guardrails
@@ -67,16 +68,7 @@ class OpenAIClient {
         ];
         // Add context from memories if available
         if (context.memories.length > 0) {
-            // Support both string[] (Phase 2) and CustomerMemory[] (legacy)
-            let memoryContext;
-            if (typeof context.memories[0] === 'string') {
-                memoryContext = context.memories.join('\n');
-            }
-            else {
-                memoryContext = context.memories
-                    .map((m) => `- ${m.content || m.key}: ${JSON.stringify(m.value)}`)
-                    .join('\n');
-            }
+            const memoryContext = context.memories.join('\n');
             messages.push({
                 role: 'system',
                 content: `Informações sobre o cliente:\n${memoryContext}`,
@@ -117,12 +109,14 @@ class OpenAIClient {
      * Generate a response using OpenAI
      */
     async generateResponse(userMessage, context) {
+        const startTime = Date.now();
         logging_1.logger.info('Generating response with OpenAI', {
             contactName: context.contactName,
             messageLength: userMessage.length,
             hasMemories: context.memories.length > 0,
             hasKnowledge: context.knowledge.length > 0,
         });
+        metrics_1.metrics.incrementCounter(metrics_1.METRICS.OPENAI_REQUESTS_TOTAL);
         try {
             const messages = this.buildMessages(context, userMessage);
             const response = await this.client.chat.completions.create({
@@ -132,9 +126,13 @@ class OpenAIClient {
                 temperature: this.temperature,
             });
             const content = response.choices[0]?.message?.content || FALLBACK_RESPONSE;
+            const latency = Date.now() - startTime;
+            metrics_1.metrics.recordHistogram(metrics_1.METRICS.OPENAI_REQUESTS_LATENCY, latency);
+            metrics_1.metrics.incrementCounter(metrics_1.METRICS.OPENAI_REQUESTS_TOTAL, { status: 'success' });
             logging_1.logger.info('OpenAI response generated', {
                 contentLength: content.length,
                 finishReason: response.choices[0]?.finish_reason,
+                latency,
             });
             return {
                 content,
@@ -142,6 +140,9 @@ class OpenAIClient {
             };
         }
         catch (error) {
+            const latency = Date.now() - startTime;
+            metrics_1.metrics.recordHistogram(metrics_1.METRICS.OPENAI_REQUESTS_LATENCY, latency);
+            metrics_1.metrics.incrementCounter(metrics_1.METRICS.OPENAI_REQUESTS_ERRORS, { error: error.message });
             logging_1.logger.error('OpenAI API error', error);
             // Return fallback response on error
             return {
