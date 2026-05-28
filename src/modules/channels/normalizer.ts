@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { NormalizedChannelMessage } from './types';
 import type { ChannelType } from './types';
 import { ChatwootWebhookPayload } from '../../shared/types';
@@ -16,7 +16,7 @@ export function normalizeFromChatwoot(
   }
 
   return {
-    messageId: uuidv4(),
+    messageId: randomUUID(),
     channel: 'chatwoot',
     conversationId: payload.conversation.uuid,
     contactId: payload.conversation.contact.id.toString(),
@@ -84,7 +84,7 @@ export function normalizeFromWhatsapp(
   }
 
   return {
-    messageId: message.id || uuidv4(),
+    messageId: message.id || randomUUID(),
     channel: 'whatsapp',
     conversationId: `whatsapp:${change.value.metadata.phone_number_id}:${message.from}`,
     contactId: message.from,

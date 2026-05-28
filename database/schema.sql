@@ -224,6 +224,121 @@ CREATE INDEX idx_tool_executions_status ON tool_executions(status);
 CREATE INDEX idx_tool_executions_created_at ON tool_executions(created_at);
 
 -- ============================================================================
+-- Phase 2: Handoffs and Sector Notifications
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS handoffs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    conversation_id VARCHAR(255) NOT NULL,
+    contact_id VARCHAR(255),
+    trigger_type VARCHAR(100) NOT NULL,
+    trigger_reason TEXT NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'pending',
+    priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+    summary TEXT,
+    pending_questions JSONB DEFAULT '[]',
+    what_was_answered TEXT,
+    what_is_missing TEXT,
+    risk_level VARCHAR(20) NOT NULL DEFAULT 'low',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    completed_at TIMESTAMP WITH TIME ZONE,
+    resolved_by VARCHAR(255),
+    resolution_notes TEXT
+);
+
+CREATE INDEX idx_handoffs_conversation_id ON handoffs(conversation_id);
+CREATE INDEX idx_handoffs_contact_id ON handoffs(contact_id);
+CREATE INDEX idx_handoffs_status ON handoffs(status);
+CREATE INDEX idx_handoffs_priority ON handoffs(priority);
+CREATE INDEX idx_handoffs_created_at ON handoffs(created_at);
+
+CREATE TABLE IF NOT EXISTS sector_notifications (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    sector VARCHAR(50) NOT NULL,
+    conversation_id VARCHAR(255),
+    contact_id VARCHAR(255),
+    message TEXT NOT NULL,
+    priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    sent_at TIMESTAMP WITH TIME ZONE,
+    read_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX idx_sector_notifications_sector ON sector_notifications(sector);
+CREATE INDEX idx_sector_notifications_status ON sector_notifications(status);
+CREATE INDEX idx_sector_notifications_conversation_id ON sector_notifications(conversation_id);
+CREATE INDEX idx_sector_notifications_created_at ON sector_notifications(created_at);
+
+-- ============================================================================
+-- Phase 2: Transactional Scheduling
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS appointment_services (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    description TEXT,
+    duration_minutes INTEGER NOT NULL DEFAULT 30,
+    requires_human_approval BOOLEAN DEFAULT false,
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS appointment_providers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name VARCHAR(255) NOT NULL,
+    sector VARCHAR(100),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS appointment_slots (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    service_id UUID REFERENCES appointment_services(id) ON DELETE SET NULL,
+    provider_id UUID REFERENCES appointment_providers(id) ON DELETE SET NULL,
+    starts_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    ends_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    status VARCHAR(30) NOT NULL DEFAULT 'available',
+    metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    CONSTRAINT appointment_slots_time_order CHECK (ends_at > starts_at)
+);
+
+CREATE INDEX idx_appointment_slots_window ON appointment_slots(starts_at, ends_at);
+CREATE INDEX idx_appointment_slots_status ON appointment_slots(status);
+CREATE INDEX idx_appointment_slots_service ON appointment_slots(service_id);
+
+CREATE TABLE IF NOT EXISTS appointments (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    slot_id UUID NOT NULL REFERENCES appointment_slots(id) ON DELETE RESTRICT,
+    service_id UUID REFERENCES appointment_services(id) ON DELETE SET NULL,
+    provider_id UUID REFERENCES appointment_providers(id) ON DELETE SET NULL,
+    conversation_id VARCHAR(255),
+    contact_id VARCHAR(255),
+    pet_id VARCHAR(255),
+    tutor_name VARCHAR(255),
+    pet_name VARCHAR(255),
+    reason TEXT,
+    status VARCHAR(30) NOT NULL DEFAULT 'reserved',
+    reservation_expires_at TIMESTAMP WITH TIME ZONE,
+    confirmed_at TIMESTAMP WITH TIME ZONE,
+    cancelled_at TIMESTAMP WITH TIME ZONE,
+    created_by VARCHAR(100) DEFAULT 'agent-secretary',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX idx_appointments_active_slot
+    ON appointments(slot_id)
+    WHERE status IN ('reserved', 'confirmed');
+CREATE INDEX idx_appointments_contact ON appointments(contact_id);
+CREATE INDEX idx_appointments_conversation ON appointments(conversation_id);
+CREATE INDEX idx_appointments_status ON appointments(status);
+
+-- ============================================================================
 -- Phase 2: Follow-up Tasks
 -- ============================================================================
 
@@ -389,6 +504,7 @@ CREATE TABLE IF NOT EXISTS operational_rules (
     description TEXT,
     rule_type VARCHAR(50) NOT NULL,  -- 'policy', 'schedule', 'handoff', 'security', 'pricing'
     content JSONB NOT NULL,  -- Structured content (e.g., { "day": "monday", "open": "07:00", "close": "19:00" })
+    priority INTEGER DEFAULT 0,
     version INTEGER DEFAULT 1,
     source VARCHAR(50) DEFAULT 'telegram',  -- 'telegram', 'manual', 'imported'
     source_id UUID REFERENCES telegram_ingestions(id) ON DELETE SET NULL,

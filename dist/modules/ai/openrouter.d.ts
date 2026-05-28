@@ -9,6 +9,8 @@ export declare class OpenRouterProvider implements AIProvider {
     healthCheck(): Promise<boolean>;
     private buildSystemPrompt;
     private buildUserMessage;
+    private requiresOperationalTooling;
+    private sanitizeOperationalClaims;
     private getFallbackResponse;
 }
 export declare const openRouterProvider: OpenRouterProvider;

@@ -1,15 +1,18 @@
 import OpenAI from 'openai';
+import {
+  ChatCompletionAssistantMessageParam,
+  ChatCompletionMessageParam,
+} from 'openai/resources/chat/completions';
 import { config } from '../../config';
 import { logger } from '../logging';
 import { AgentResponse, KnowledgeChunk } from '../../shared/types';
 import { metrics, METRICS } from '../../shared/metrics';
-
-export interface OpenAIMessage {
-  role: 'system' | 'user' | 'assistant';
-  content: string;
-}
+import { executeAgentTool, getOpenAITools } from '../agent-tools';
 
 export interface AgentContext {
+  conversationId?: string;
+  contactId?: string;
+  schedulingState?: unknown;
   contactName: string;
   conversationHistory: string[];
   memories: string[];  // Phase 2: formatted strings for LLM
@@ -41,9 +44,11 @@ const SYSTEM_PROMPT = `Você é a assistente virtual do Hospital Veterinário CV
 4. **NÃO invente informações** - Se não souber, seja honesta
 5. **Sempre sugira agendamento** quando houver dúvidas de saúde
 6. **Em emergências**, oriente busca de atendimento urgente imediato
+7. **NUNCA confirme horário sem a ferramenta confirm_appointment retornar sucesso**
 
 ## Como Responder
 - Perguntas sobre serviços/horários: Responda com base no conhecimento institucional
+- Agendamento: consulte horários com check_available_slots, reserve com reserve_slot e confirme apenas com confirm_appointment
 - Perguntas sobre saúde do pet: Mostre empatia, sugira consulta
 - Dúvidas que não sabe: "Não tenho essa informação específica, posso verificar com um atendente"
 - Situações de emergência: Escale imediatamente para atendimento humano
@@ -62,7 +67,7 @@ const SYSTEM_PROMPT = `Você é a assistente virtual do Hospital Veterinário CV
  */
 const FALLBACK_RESPONSE = 'Peço desculpas, estou tendo dificuldades para processar sua solicitação neste momento. Um de nossos atendentes logo irá ajudá-lo.';
 
-class OpenAIClient {
+export class OpenAIClient {
   private client: OpenAI;
   private model: string;
   private maxTokens: number;
@@ -80,8 +85,8 @@ class OpenAIClient {
   /**
    * Build messages array for OpenAI API
    */
-  private buildMessages(context: AgentContext, userMessage: string): OpenAIMessage[] {
-    const messages: OpenAIMessage[] = [
+  private buildMessages(context: AgentContext, userMessage: string): ChatCompletionMessageParam[] {
+    const messages: ChatCompletionMessageParam[] = [
       { role: 'system', content: SYSTEM_PROMPT },
     ];
 
@@ -116,6 +121,13 @@ class OpenAIClient {
       });
     }
 
+    if (context.schedulingState) {
+      messages.push({
+        role: 'system',
+        content: `Estado de agendamento:\n${JSON.stringify(context.schedulingState)}`,
+      });
+    }
+
     // Add conversation history
     for (const historyMsg of context.conversationHistory) {
       messages.push({ role: 'user', content: historyMsg });
@@ -128,6 +140,34 @@ class OpenAIClient {
     });
 
     return messages;
+  }
+
+  private async runToolCalls(
+    messages: ChatCompletionMessageParam[],
+    assistantMessage: ChatCompletionAssistantMessageParam,
+    context: AgentContext
+  ): Promise<void> {
+    messages.push(assistantMessage);
+
+    for (const toolCall of assistantMessage.tool_calls || []) {
+      if (toolCall.type !== 'function') continue;
+
+      const result = await executeAgentTool(
+        toolCall.function.name,
+        toolCall.function.arguments,
+        {
+          conversationId: context.conversationId,
+          contactId: context.contactId,
+          contactName: context.contactName,
+        }
+      );
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: toolCall.id,
+        content: JSON.stringify(result),
+      });
+    }
   }
 
   /**
@@ -150,15 +190,36 @@ class OpenAIClient {
 
     try {
       const messages = this.buildMessages(context, userMessage);
+      const tools = getOpenAITools();
+      let content = FALLBACK_RESPONSE;
+      let finishReason: string | null | undefined;
+      const maxToolRounds = 3;
 
-      const response = await this.client.chat.completions.create({
-        model: this.model,
-        messages,
-        max_tokens: this.maxTokens,
-        temperature: this.temperature,
-      });
+      for (let round = 0; round <= maxToolRounds; round++) {
+        const response = await this.client.chat.completions.create({
+          model: this.model,
+          messages,
+          tools,
+          tool_choice: 'auto',
+          max_tokens: this.maxTokens,
+          temperature: this.temperature,
+        });
 
-      const content = response.choices[0]?.message?.content || FALLBACK_RESPONSE;
+        const message = response.choices[0]?.message;
+        finishReason = response.choices[0]?.finish_reason;
+
+        if (message?.tool_calls?.length) {
+          await this.runToolCalls(
+            messages,
+            message as ChatCompletionAssistantMessageParam,
+            context
+          );
+          continue;
+        }
+
+        content = message?.content || FALLBACK_RESPONSE;
+        break;
+      }
       
       const latency = Date.now() - startTime;
       metrics.recordHistogram(METRICS.OPENAI_REQUESTS_LATENCY, latency);
@@ -166,7 +227,7 @@ class OpenAIClient {
 
       logger.info('OpenAI response generated', {
         contentLength: content.length,
-        finishReason: response.choices[0]?.finish_reason,
+        finishReason,
         latency,
       });
 

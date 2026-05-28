@@ -33,6 +33,14 @@ export interface AppConfig {
         accountId: string;
         webhookSecret?: string;
     };
+    auth: {
+        apiToken: string;
+    };
+    qdrant: {
+        url: string;
+        apiKey: string;
+        collection: string;
+    };
     logging: {
         level: string;
     };

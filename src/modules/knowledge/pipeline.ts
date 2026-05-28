@@ -4,6 +4,7 @@
 import { knowledgeRepository } from './repository';
 import { KnowledgeDocument } from './types';
 import { chunkDocument, generateChunkEmbeddings } from './chunking';
+import { knowledgeRetrievalService } from './retrieval';
 
 export async function createChunksForDocument(
   document: KnowledgeDocument,
@@ -24,5 +25,6 @@ export async function createChunksForDocument(
   }
 
   const created = await knowledgeRepository.createChunks(chunks);
+  await knowledgeRetrievalService.addChunks(created);
   return created.length;
 }

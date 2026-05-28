@@ -38,6 +38,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.knowledgeRepository = void 0;
 const db_1 = require("../../shared/db");
 const service_1 = require("../audit/service");
+const logging_1 = require("../logging");
 /**
  * Knowledge Repository
  * Handles all database operations for knowledge documents and chunks
@@ -157,12 +158,117 @@ class KnowledgeRepository {
         return result.rows.map(this.mapRowToDocument);
     }
     /**
+     * List documents for administrative review.
+     */
+    async listDocuments(filters = {}) {
+        const clauses = ['is_active = true'];
+        const params = [];
+        if (filters.status) {
+            params.push(filters.status);
+            clauses.push(`status = $${params.length}`);
+        }
+        if (filters.category) {
+            params.push(filters.category);
+            clauses.push(`category = $${params.length}`);
+        }
+        params.push(filters.limit || 50);
+        const sql = `
+      SELECT * FROM knowledge_documents
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT $${params.length}
+    `;
+        const result = await (0, db_1.query)(sql, params);
+        return result.rows.map(this.mapRowToDocument);
+    }
+    /**
+     * Submit a draft/rejected document for review.
+     */
+    async submitForReview(id) {
+        const doc = await this.getDocument(id);
+        if (!doc) {
+            throw new Error(`Document not found: ${id}`);
+        }
+        if (!['draft', 'rejected'].includes(doc.status)) {
+            throw new Error(`Document cannot be submitted for review from status: ${doc.status}`);
+        }
+        return this.updateDocument({ id, status: 'pending_review' });
+    }
+    /**
+     * Approve a document after review. Approval does not publish content.
+     */
+    async approveDocument(id, approvedBy) {
+        const doc = await this.getDocument(id);
+        if (!doc) {
+            throw new Error(`Document not found: ${id}`);
+        }
+        if (doc.status !== 'pending_review') {
+            throw new Error(`Document must be pending_review before approval: ${doc.status}`);
+        }
+        const approved = await this.updateDocument({
+            id,
+            status: 'approved',
+            approvedBy,
+        });
+        await service_1.auditService.recordEvent({
+            eventType: 'knowledge_updated',
+            actor: approvedBy,
+            resourceType: 'knowledge_document',
+            resourceId: id,
+            action: 'approve',
+            details: {
+                title: approved.title,
+                category: approved.category,
+            },
+        });
+        return approved;
+    }
+    /**
+     * Reject a document and keep it out of retrieval.
+     */
+    async rejectDocument(id, rejectedBy, reason) {
+        const doc = await this.getDocument(id);
+        if (!doc) {
+            throw new Error(`Document not found: ${id}`);
+        }
+        if (!['pending_review', 'draft'].includes(doc.status)) {
+            throw new Error(`Document cannot be rejected from status: ${doc.status}`);
+        }
+        const metadata = {
+            ...doc.metadata,
+            rejectionReason: reason,
+            rejectedBy,
+            rejectedAt: new Date().toISOString(),
+        };
+        const rejected = await this.updateDocument({
+            id,
+            status: 'rejected',
+            metadata,
+        });
+        await service_1.auditService.recordEvent({
+            eventType: 'knowledge_rejected',
+            actor: rejectedBy,
+            resourceType: 'knowledge_document',
+            resourceId: id,
+            action: 'reject',
+            details: {
+                title: rejected.title,
+                category: rejected.category,
+                reason,
+            },
+        });
+        return rejected;
+    }
+    /**
      * Approve and publish a document
      */
     async publishDocument(id, approvedBy) {
         const doc = await this.getDocument(id);
         if (!doc) {
             throw new Error(`Document not found: ${id}`);
+        }
+        if (doc.status !== 'approved') {
+            throw new Error(`Document must be approved before publication: ${doc.status}`);
         }
         await (0, db_1.query)(`UPDATE knowledge_documents SET is_active = false, status = 'approved' 
        WHERE id != $1 AND title = (SELECT title FROM knowledge_documents WHERE id = $1)`, [id]);
@@ -184,7 +290,10 @@ class KnowledgeRepository {
             await createChunksForDocument(publishedDoc);
         }
         catch (error) {
-            console.warn('Failed to create chunks for document:', error.message);
+            logging_1.logger.warn('Failed to create chunks for document', {
+                documentId: id,
+                error: error.message,
+            });
         }
         // Audit trail for publication
         await service_1.auditService.recordEvent({

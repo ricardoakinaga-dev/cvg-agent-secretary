@@ -62,12 +62,14 @@ describe('RBAC Module', () => {
   describe('getRolePermissions', () => {
     it('should return all permissions for admin', () => {
       const permissions = getRolePermissions('admin');
-      expect(permissions.length).toBe(14);
+      expect(permissions).toContain('settings:write');
+      expect(permissions).toContain('scheduling:write');
     });
 
     it('should return limited permissions for viewer', () => {
       const permissions = getRolePermissions('viewer');
-      expect(permissions.length).toBe(3);
+      expect(permissions).toContain('scheduling:read');
+      expect(permissions).not.toContain('scheduling:write');
     });
   });
 

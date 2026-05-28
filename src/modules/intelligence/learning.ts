@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { logger } from '../logging';
 import { query } from '../../shared/db';
 
@@ -71,7 +71,7 @@ export interface LearningInsight {
 
 export class LearningLoopService {
   async recordFeedback(input: CreateFeedbackInput): Promise<ResponseFeedback> {
-    const id = uuidv4();
+    const id = randomUUID();
     
     const sql = `
       INSERT INTO response_feedback (
@@ -208,7 +208,7 @@ export class LearningLoopService {
     for (const failure of failures) {
       if (failure.count >= 3) {
         insights.push({
-          id: uuidv4(),
+          id: randomUUID(),
           insightType: 'knowledge_gap',
           description: `Frequent failures (${failure.count}) related to: ${failure.failureType.replace('_', ' ')}`,
           evidence: failure.exampleQueries,

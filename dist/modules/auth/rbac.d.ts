@@ -1,5 +1,5 @@
 export type Role = 'admin' | 'manager' | 'agent' | 'viewer';
-export type Permission = 'conversations:read' | 'conversations:write' | 'conversations:delete' | 'knowledge:read' | 'knowledge:write' | 'knowledge:publish' | 'knowledge:approve' | 'analytics:read' | 'analytics:export' | 'audit:read' | 'users:read' | 'users:write' | 'settings:read' | 'settings:write';
+export type Permission = 'conversations:read' | 'conversations:write' | 'conversations:delete' | 'knowledge:read' | 'knowledge:write' | 'knowledge:publish' | 'knowledge:approve' | 'scheduling:read' | 'scheduling:write' | 'analytics:read' | 'analytics:export' | 'audit:read' | 'users:read' | 'users:write' | 'settings:read' | 'settings:write';
 export interface UserContext {
     id: string;
     role: Role;

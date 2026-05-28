@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # Redis for caching and state
   redis:
@@ -32,6 +30,15 @@ services:
       timeout: 3s
       retries: 3
 
+  # Qdrant vector store for semantic knowledge retrieval
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+
   # CVG Secretary Agent
   agent:
     build:
@@ -45,15 +52,26 @@ services:
       DATABASE_URL: postgres://postgres:postgres@postgres:5432/cvg_agent
       REDIS_URL: redis://redis:6379
       OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4}
+      AI_PROVIDER: ${AI_PROVIDER:-auto}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
       CHATWOOT_API_URL: ${CHATWOOT_API_URL}
       CHATWOOT_API_TOKEN: ${CHATWOOT_API_TOKEN}
       CHATWOOT_ACCOUNT_ID: ${CHATWOOT_ACCOUNT_ID}
+      CHATWOOT_WEBHOOK_SECRET: ${CHATWOOT_WEBHOOK_SECRET}
+      API_ADMIN_TOKEN: ${API_ADMIN_TOKEN}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-cvg_knowledge_chunks}
       LOG_LEVEL: info
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     volumes:
       - ./src:/app/src
     command: npm run dev
@@ -61,3 +79,4 @@ services:
 volumes:
   redis_data:
   postgres_data:
+  qdrant_data:

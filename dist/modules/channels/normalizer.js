@@ -5,7 +5,7 @@ exports.normalizeFromTelegram = normalizeFromTelegram;
 exports.normalizeFromWhatsapp = normalizeFromWhatsapp;
 exports.detectChannelType = detectChannelType;
 exports.isValidChannelMessage = isValidChannelMessage;
-const uuid_1 = require("uuid");
+const crypto_1 = require("crypto");
 function normalizeFromChatwoot(payload) {
     if (!payload.message || payload.message.message_type !== 'incoming') {
         return null;
@@ -15,7 +15,7 @@ function normalizeFromChatwoot(payload) {
         return null;
     }
     return {
-        messageId: (0, uuid_1.v4)(),
+        messageId: (0, crypto_1.randomUUID)(),
         channel: 'chatwoot',
         conversationId: payload.conversation.uuid,
         contactId: payload.conversation.contact.id.toString(),
@@ -73,7 +73,7 @@ function normalizeFromWhatsapp(payload) {
         return null;
     }
     return {
-        messageId: message.id || (0, uuid_1.v4)(),
+        messageId: message.id || (0, crypto_1.randomUUID)(),
         channel: 'whatsapp',
         conversationId: `whatsapp:${change.value.metadata.phone_number_id}:${message.from}`,
         contactId: message.from,

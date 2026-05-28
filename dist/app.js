@@ -38,23 +38,32 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.app = void 0;
 const express_1 = __importDefault(require("express"));
-const uuid_1 = require("uuid");
+const crypto_1 = require("crypto");
 const logging_1 = require("./modules/logging");
 const agentRuntime_1 = require("./modules/runtime/agentRuntime");
 const client_1 = require("./modules/chatwoot/client");
 const redis_1 = require("./shared/redis");
 const client_2 = require("./modules/openai/client");
 const rate_limit_1 = require("./middleware/rate-limit");
+const auth_1 = require("./middleware/auth");
+const chatwoot_signature_1 = require("./middleware/chatwoot-signature");
 const index_1 = require("./modules/analytics/index");
+const adminRoutes_1 = require("./modules/knowledge/adminRoutes");
+const retrieval_1 = require("./modules/knowledge/retrieval");
+const adminRoutes_2 = require("./modules/scheduling/adminRoutes");
 const metrics_1 = require("./shared/metrics");
 const db_1 = require("./shared/db");
 const app = (0, express_1.default)();
 exports.app = app;
 // Middleware
-app.use(express_1.default.json());
+app.use(express_1.default.json({
+    verify: (req, _res, buf) => {
+        req.rawBody = Buffer.from(buf);
+    },
+}));
 // Request ID middleware
 app.use((req, res, next) => {
-    req.headers['x-correlation-id'] = req.headers['x-correlation-id'] || (0, uuid_1.v4)();
+    req.headers['x-correlation-id'] = req.headers['x-correlation-id'] || (0, crypto_1.randomUUID)();
     next();
 });
 // Logging middleware
@@ -81,8 +90,10 @@ app.get('/ready', async (req, res) => {
     const isReady = await checkReadiness();
     res.status(isReady ? 200 : 503).json({ ready: isReady });
 });
+app.use('/api/knowledge', auth_1.authenticateApi, adminRoutes_1.knowledgeAdminRouter);
+app.use('/api/scheduling', auth_1.authenticateApi, adminRoutes_2.schedulingAdminRouter);
 // Analytics dashboard endpoint
-app.get('/api/analytics/dashboard', async (req, res) => {
+app.get('/api/analytics/dashboard', auth_1.authenticateApi, (0, auth_1.requirePermission)('analytics:read'), async (req, res) => {
     try {
         const since = req.query.since
             ? new Date(req.query.since)
@@ -157,7 +168,7 @@ app.get('/api/analytics/dashboard', async (req, res) => {
     }
 });
 // Metrics endpoint
-app.get('/api/metrics', async (req, res) => {
+app.get('/api/metrics', auth_1.authenticateApi, (0, auth_1.requirePermission)('analytics:read'), async (req, res) => {
     try {
         const allMetrics = metrics_1.metrics.getAllMetrics();
         res.json(allMetrics);
@@ -168,7 +179,7 @@ app.get('/api/metrics', async (req, res) => {
     }
 });
 // Audit trail endpoint
-app.get('/api/audit/events', async (req, res) => {
+app.get('/api/audit/events', auth_1.authenticateApi, (0, auth_1.requirePermission)('audit:read'), async (req, res) => {
     try {
         const { auditService } = await Promise.resolve().then(() => __importStar(require('./modules/audit/service')));
         const filters = {};
@@ -189,7 +200,7 @@ app.get('/api/audit/events', async (req, res) => {
     }
 });
 // Operational report endpoint - weekly supervised operation metrics
-app.get('/api/operational-report', async (req, res) => {
+app.get('/api/operational-report', auth_1.authenticateApi, (0, auth_1.requirePermission)('analytics:read'), async (req, res) => {
     try {
         const days = parseInt(req.query.days, 10) || 7;
         const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -252,7 +263,7 @@ app.get('/api/operational-report', async (req, res) => {
     }
 });
 // Chatwoot webhook endpoint
-app.post('/webhooks/chatwoot', async (req, res) => {
+app.post('/webhooks/chatwoot', chatwoot_signature_1.verifyChatwootSignature, async (req, res) => {
     const correlationId = req.headers['x-correlation-id'];
     const log = logging_1.logger.child({ correlationId });
     log.info('Chatwoot webhook received', {
@@ -305,6 +316,7 @@ async function getHealthStatus() {
         postgres: 'disconnected',
         chatwoot: 'disconnected',
         openai: 'disconnected',
+        knowledge: 'disconnected',
     };
     let allHealthy = true;
     // Check Redis
@@ -345,6 +357,17 @@ async function getHealthStatus() {
     }
     catch {
         dependencies.openai = 'error';
+        allHealthy = false;
+    }
+    // Check knowledge retrieval. Qdrant is optional; the service reports healthy
+    // when its active retrieval backend, including PostgreSQL fallback, is usable.
+    try {
+        const knowledgeHealthy = await retrieval_1.knowledgeRetrievalService.healthCheck();
+        dependencies.knowledge = knowledgeHealthy ? 'connected' : 'error';
+        allHealthy = allHealthy && knowledgeHealthy;
+    }
+    catch {
+        dependencies.knowledge = 'error';
         allHealthy = false;
     }
     return {

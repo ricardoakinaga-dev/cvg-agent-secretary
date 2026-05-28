@@ -40,6 +40,14 @@ export interface AppConfig {
     accountId: string;
     webhookSecret?: string;
   };
+  auth: {
+    apiToken: string;
+  };
+  qdrant: {
+    url: string;
+    apiKey: string;
+    collection: string;
+  };
   logging: {
     level: string;
   };
@@ -100,6 +108,14 @@ export const config: AppConfig = {
     accountId: getRequiredEnv('CHATWOOT_ACCOUNT_ID'),
     webhookSecret: getOptionalEnv('CHATWOOT_WEBHOOK_SECRET', ''),
   },
+  auth: {
+    apiToken: getOptionalEnv('API_ADMIN_TOKEN', ''),
+  },
+  qdrant: {
+    url: getOptionalEnv('QDRANT_URL', ''),
+    apiKey: getOptionalEnv('QDRANT_API_KEY', ''),
+    collection: getOptionalEnv('QDRANT_COLLECTION', 'cvg_knowledge_chunks'),
+  },
   logging: {
     level: getOptionalEnv('LOG_LEVEL', 'info'),
   },
@@ -116,10 +132,12 @@ export function validateConfig(): { valid: boolean; errors: string[] } {
   if (!config.chatwoot.apiToken) errors.push('CHATWOOT_API_TOKEN is required');
   if (!config.chatwoot.accountId) errors.push('CHATWOOT_ACCOUNT_ID is required');
 
-  // Warn about missing recommended secrets in production
   if (config.isProduction) {
     if (!config.chatwoot.webhookSecret) {
-      errors.push('CHATWOOT_WEBHOOK_SECRET is recommended in production');
+      errors.push('CHATWOOT_WEBHOOK_SECRET is required in production');
+    }
+    if (!config.auth.apiToken) {
+      errors.push('API_ADMIN_TOKEN is required in production');
     }
   }
 
@@ -153,6 +171,13 @@ export function getSafeConfig(): Record<string, unknown> {
     chatwoot: {
       apiUrl: config.chatwoot.apiUrl,
       accountId: config.chatwoot.accountId,
+    },
+    auth: {
+      apiTokenConfigured: Boolean(config.auth.apiToken),
+    },
+    qdrant: {
+      urlConfigured: Boolean(config.qdrant.url),
+      collection: config.qdrant.collection,
     },
     logging: config.logging,
   };

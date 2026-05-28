@@ -1,9 +1,8 @@
 import { AgentResponse, KnowledgeChunk } from '../../shared/types';
-export interface OpenAIMessage {
-    role: 'system' | 'user' | 'assistant';
-    content: string;
-}
 export interface AgentContext {
+    conversationId?: string;
+    contactId?: string;
+    schedulingState?: unknown;
     contactName: string;
     conversationHistory: string[];
     memories: string[];
@@ -15,7 +14,7 @@ export interface AgentContext {
     }>;
     knowledge: KnowledgeChunk[];
 }
-declare class OpenAIClient {
+export declare class OpenAIClient {
     private client;
     private model;
     private maxTokens;
@@ -25,6 +24,7 @@ declare class OpenAIClient {
      * Build messages array for OpenAI API
      */
     private buildMessages;
+    private runToolCalls;
     /**
      * Generate a response using OpenAI
      */
@@ -39,5 +39,4 @@ declare class OpenAIClient {
     healthCheck(): Promise<boolean>;
 }
 export declare const openaiClient: OpenAIClient;
-export {};
 //# sourceMappingURL=client.d.ts.map

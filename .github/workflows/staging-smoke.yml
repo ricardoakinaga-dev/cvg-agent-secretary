@@ -1,0 +1,91 @@
+name: Staging Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_evolution_test_message:
+        description: 'Send a real EvolutionAPI WhatsApp test message'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      strict_health:
+        description: 'Require /health status=healthy instead of allowing degraded'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  full-flow-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    env:
+      AGENT_BASE_URL: ${{ secrets.STAGING_AGENT_BASE_URL }}
+      CHATWOOT_WEBHOOK_SECRET: ${{ secrets.STAGING_CHATWOOT_WEBHOOK_SECRET }}
+      SMOKE_CHATWOOT_CONVERSATION_ID: ${{ secrets.STAGING_CHATWOOT_CONVERSATION_ID }}
+      SMOKE_CHATWOOT_ACCOUNT_ID: ${{ secrets.STAGING_CHATWOOT_ACCOUNT_ID }}
+      SMOKE_CHATWOOT_INBOX_ID: ${{ secrets.STAGING_CHATWOOT_INBOX_ID }}
+      SMOKE_CHATWOOT_CONTACT_ID: ${{ secrets.STAGING_CHATWOOT_CONTACT_ID }}
+      SMOKE_CHATWOOT_CONTACT_NAME: ${{ secrets.STAGING_CHATWOOT_CONTACT_NAME }}
+      SMOKE_MESSAGE_CONTENT: ${{ secrets.STAGING_SMOKE_MESSAGE_CONTENT }}
+      SMOKE_STRICT_HEALTH: ${{ inputs.strict_health }}
+      EVOLUTION_API_URL: ${{ secrets.STAGING_EVOLUTION_API_URL }}
+      EVOLUTION_API_KEY: ${{ secrets.STAGING_EVOLUTION_API_KEY }}
+      WHATSAPP_INSTANCE: ${{ secrets.STAGING_WHATSAPP_INSTANCE }}
+      SEND_EVOLUTION_TEST_MESSAGE: ${{ inputs.send_evolution_test_message }}
+      TEST_WHATSAPP_NUMBER: ${{ secrets.STAGING_TEST_WHATSAPP_NUMBER }}
+      EVOLUTION_TEST_MESSAGE: ${{ secrets.STAGING_EVOLUTION_TEST_MESSAGE }}
+      SMOKE_TIMEOUT_MS: '15000'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify required smoke secrets are present
+        shell: bash
+        run: |
+          required=(
+            AGENT_BASE_URL
+            CHATWOOT_WEBHOOK_SECRET
+            SMOKE_CHATWOOT_CONVERSATION_ID
+            SMOKE_CHATWOOT_ACCOUNT_ID
+            SMOKE_CHATWOOT_INBOX_ID
+            SMOKE_CHATWOOT_CONTACT_ID
+            EVOLUTION_API_URL
+            EVOLUTION_API_KEY
+            WHATSAPP_INSTANCE
+          )
+
+          missing=()
+          for name in "${required[@]}"; do
+            if [ -z "${!name}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${SEND_EVOLUTION_TEST_MESSAGE}" = "true" ] && [ -z "${TEST_WHATSAPP_NUMBER}" ]; then
+            missing+=("TEST_WHATSAPP_NUMBER")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "Missing required smoke variables: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Run full flow smoke test
+        run: npm run smoke:full-flow

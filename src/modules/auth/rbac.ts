@@ -11,6 +11,8 @@ export type Permission =
   | 'knowledge:write'
   | 'knowledge:publish'
   | 'knowledge:approve'
+  | 'scheduling:read'
+  | 'scheduling:write'
   | 'analytics:read'
   | 'analytics:export'
   | 'audit:read'
@@ -29,6 +31,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'knowledge:write',
     'knowledge:publish',
     'knowledge:approve',
+    'scheduling:read',
+    'scheduling:write',
     'analytics:read',
     'analytics:export',
     'audit:read',
@@ -44,6 +48,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'knowledge:write',
     'knowledge:publish',
     'knowledge:approve',
+    'scheduling:read',
+    'scheduling:write',
     'analytics:read',
     'analytics:export',
     'audit:read',
@@ -55,11 +61,14 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'conversations:write',
     'knowledge:read',
     'knowledge:write',
+    'scheduling:read',
+    'scheduling:write',
     'analytics:read',
   ],
   viewer: [
     'conversations:read',
     'knowledge:read',
+    'scheduling:read',
     'analytics:read',
   ],
 };

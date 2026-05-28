@@ -129,5 +129,6 @@ export interface DependencyStatus {
     postgres: 'connected' | 'disconnected' | 'error';
     chatwoot: 'connected' | 'disconnected' | 'error';
     openai: 'connected' | 'disconnected' | 'error';
+    knowledge: 'connected' | 'disconnected' | 'error';
 }
 //# sourceMappingURL=types.d.ts.map

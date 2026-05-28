@@ -1,4 +1,4 @@
-import { KnowledgeDocument, KnowledgeChunk, CreateKnowledgeDocumentInput, UpdateKnowledgeDocumentInput, CreateKnowledgeChunkInput, KnowledgeCategory, KnowledgeSearchOptions } from './types';
+import { KnowledgeDocument, KnowledgeChunk, CreateKnowledgeDocumentInput, UpdateKnowledgeDocumentInput, CreateKnowledgeChunkInput, KnowledgeCategory, KnowledgeDocumentStatus, KnowledgeSearchOptions } from './types';
 /**
  * Knowledge Repository
  * Handles all database operations for knowledge documents and chunks
@@ -24,6 +24,26 @@ declare class KnowledgeRepository {
      * Get published documents
      */
     getPublishedDocuments(): Promise<KnowledgeDocument[]>;
+    /**
+     * List documents for administrative review.
+     */
+    listDocuments(filters?: {
+        status?: KnowledgeDocumentStatus;
+        category?: KnowledgeCategory;
+        limit?: number;
+    }): Promise<KnowledgeDocument[]>;
+    /**
+     * Submit a draft/rejected document for review.
+     */
+    submitForReview(id: string): Promise<KnowledgeDocument>;
+    /**
+     * Approve a document after review. Approval does not publish content.
+     */
+    approveDocument(id: string, approvedBy: string): Promise<KnowledgeDocument>;
+    /**
+     * Reject a document and keep it out of retrieval.
+     */
+    rejectDocument(id: string, rejectedBy: string, reason?: string): Promise<KnowledgeDocument>;
     /**
      * Approve and publish a document
      */

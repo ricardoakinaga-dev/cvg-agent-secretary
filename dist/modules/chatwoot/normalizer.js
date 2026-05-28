@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeMessage = normalizeMessage;
 exports.isRelevantEvent = isRelevantEvent;
 exports.extractConversationMetadata = extractConversationMetadata;
-const uuid_1 = require("uuid");
+const crypto_1 = require("crypto");
 /**
  * Normalizes a Chatwoot webhook payload into internal format
  */
@@ -22,7 +22,7 @@ function normalizeMessage(payload) {
         return null;
     }
     const normalized = {
-        messageId: (0, uuid_1.v4)(),
+        messageId: (0, crypto_1.randomUUID)(),
         chatwootMessageId: message.id,
         conversationId: payload.conversation.uuid,
         chatwootConversationId: payload.conversation.id,

@@ -3,8 +3,10 @@
 // Provides abstraction layer for different vector store backends
 
 import { logger } from '../logging';
+import { config } from '../../config';
 import { openaiClient } from '../openai/client';
 import { knowledgeRepository } from './repository';
+import { QdrantVectorStore } from './qdrant';
 import { metrics, METRICS } from '../../shared/metrics';
 import { redisClient } from '../../shared/redis';
 import {
@@ -88,8 +90,9 @@ class KnowledgeRetrievalService {
 
   constructor() {
     this.config = DEFAULT_CONFIG;
-    // Use PostgreSQL full-text search as default fallback
-    this.vectorStore = new PostgresFullTextStore();
+    this.vectorStore = config.qdrant.url
+      ? new QdrantVectorStore(this.config.embeddingDimensions)
+      : new PostgresFullTextStore();
   }
 
   /**
@@ -112,10 +115,14 @@ class KnowledgeRetrievalService {
         logger.info('Knowledge retrieval service initialized with vector store');
       } else {
         logger.warn('Vector store not healthy, using PostgreSQL full-text fallback');
+        this.vectorStore = new PostgresFullTextStore();
+        await this.vectorStore.initialize();
         this.useVectorStore = false;
       }
     } catch (error) {
       logger.warn('Vector store initialization failed, using PostgreSQL fallback', { error: error as Error });
+      this.vectorStore = new PostgresFullTextStore();
+      await this.vectorStore.initialize();
       this.useVectorStore = false;
     }
 
@@ -230,6 +237,24 @@ class KnowledgeRetrievalService {
       }
 
       return [];
+    }
+  }
+
+  async addChunks(chunks: import('./types').KnowledgeChunk[]): Promise<void> {
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+
+    if (!this.useVectorStore) {
+      return;
+    }
+
+    try {
+      await this.vectorStore.addChunks(chunks);
+    } catch (error) {
+      logger.warn('Failed to add chunks to vector store', {
+        error: (error as Error).message,
+      });
     }
   }
 

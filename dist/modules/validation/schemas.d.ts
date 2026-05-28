@@ -116,18 +116,18 @@ export declare const MemorySchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     key: string;
     contactId: string;
-    confidence: number;
     category: "fact" | "preference" | "history" | "complaint" | "instruction" | "feedback";
     source: "manual" | "imported" | "conversation" | "inferred";
+    confidence: number;
     value?: unknown;
     conversationId?: string | undefined;
     petId?: string | undefined;
 }, {
     key: string;
     contactId: string;
-    confidence: number;
     category: "fact" | "preference" | "history" | "complaint" | "instruction" | "feedback";
     source: "manual" | "imported" | "conversation" | "inferred";
+    confidence: number;
     value?: unknown;
     conversationId?: string | undefined;
     petId?: string | undefined;
@@ -141,15 +141,15 @@ export declare const UpdateMemorySchema: z.ZodObject<{
     lastConfirmedAt: z.ZodOptional<z.ZodDate>;
 }, "strip", z.ZodTypeAny, {
     value?: unknown;
-    confidence?: number | undefined;
     source?: "manual" | "imported" | "conversation" | "inferred" | undefined;
     isActive?: boolean | undefined;
+    confidence?: number | undefined;
     lastConfirmedAt?: Date | undefined;
 }, {
     value?: unknown;
-    confidence?: number | undefined;
     source?: "manual" | "imported" | "conversation" | "inferred" | undefined;
     isActive?: boolean | undefined;
+    confidence?: number | undefined;
     lastConfirmedAt?: Date | undefined;
 }>;
 export type UpdateMemoryInput = z.infer<typeof UpdateMemorySchema>;
@@ -230,6 +230,7 @@ export declare const UpdatePetSchema: z.ZodObject<{
 }, "strip", z.ZodTypeAny, {
     contactId?: string | undefined;
     name?: string | undefined;
+    isActive?: boolean | undefined;
     chatwootId?: number | undefined;
     species?: "cachorro" | "gato" | "pássaro" | "outro" | "coelho" | "hamster" | "peixe" | "réptil" | undefined;
     breed?: string | undefined;
@@ -245,10 +246,10 @@ export declare const UpdatePetSchema: z.ZodObject<{
     medicalConditions?: string | undefined;
     behaviorNotes?: string | undefined;
     photoUrl?: string | undefined;
-    isActive?: boolean | undefined;
 }, {
     contactId?: string | undefined;
     name?: string | undefined;
+    isActive?: boolean | undefined;
     chatwootId?: number | undefined;
     species?: "cachorro" | "gato" | "pássaro" | "outro" | "coelho" | "hamster" | "peixe" | "réptil" | undefined;
     breed?: string | undefined;
@@ -264,7 +265,6 @@ export declare const UpdatePetSchema: z.ZodObject<{
     medicalConditions?: string | undefined;
     behaviorNotes?: string | undefined;
     photoUrl?: string | undefined;
-    isActive?: boolean | undefined;
 }>;
 export type UpdatePetInput = z.infer<typeof UpdatePetSchema>;
 export declare const ChatwootWebhookSchema: z.ZodObject<{

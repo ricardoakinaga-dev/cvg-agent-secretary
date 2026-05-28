@@ -5,8 +5,10 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.KnowledgeRetrievalService = exports.knowledgeRetrievalService = void 0;
 const logging_1 = require("../logging");
+const config_1 = require("../../config");
 const client_1 = require("../openai/client");
 const repository_1 = require("./repository");
+const qdrant_1 = require("./qdrant");
 const metrics_1 = require("../../shared/metrics");
 const redis_1 = require("../../shared/redis");
 /**
@@ -70,8 +72,9 @@ class KnowledgeRetrievalService {
     useVectorStore = false;
     constructor() {
         this.config = DEFAULT_CONFIG;
-        // Use PostgreSQL full-text search as default fallback
-        this.vectorStore = new PostgresFullTextStore();
+        this.vectorStore = config_1.config.qdrant.url
+            ? new qdrant_1.QdrantVectorStore(this.config.embeddingDimensions)
+            : new PostgresFullTextStore();
     }
     /**
      * Initialize the retrieval service
@@ -92,11 +95,15 @@ class KnowledgeRetrievalService {
             }
             else {
                 logging_1.logger.warn('Vector store not healthy, using PostgreSQL full-text fallback');
+                this.vectorStore = new PostgresFullTextStore();
+                await this.vectorStore.initialize();
                 this.useVectorStore = false;
             }
         }
         catch (error) {
             logging_1.logger.warn('Vector store initialization failed, using PostgreSQL fallback', { error: error });
+            this.vectorStore = new PostgresFullTextStore();
+            await this.vectorStore.initialize();
             this.useVectorStore = false;
         }
         this.isInitialized = true;
@@ -198,6 +205,22 @@ class KnowledgeRetrievalService {
                 }
             }
             return [];
+        }
+    }
+    async addChunks(chunks) {
+        if (!this.isInitialized) {
+            await this.initialize();
+        }
+        if (!this.useVectorStore) {
+            return;
+        }
+        try {
+            await this.vectorStore.addChunks(chunks);
+        }
+        catch (error) {
+            logging_1.logger.warn('Failed to add chunks to vector store', {
+                error: error.message,
+            });
         }
     }
     /**

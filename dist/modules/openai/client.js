@@ -3,11 +3,12 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.openaiClient = void 0;
+exports.openaiClient = exports.OpenAIClient = void 0;
 const openai_1 = __importDefault(require("openai"));
 const config_1 = require("../../config");
 const logging_1 = require("../logging");
 const metrics_1 = require("../../shared/metrics");
+const agent_tools_1 = require("../agent-tools");
 /**
  * System prompt for the secretary agent
  * Defines persona, behavior, and guardrails
@@ -27,9 +28,11 @@ const SYSTEM_PROMPT = `Você é a assistente virtual do Hospital Veterinário CV
 4. **NÃO invente informações** - Se não souber, seja honesta
 5. **Sempre sugira agendamento** quando houver dúvidas de saúde
 6. **Em emergências**, oriente busca de atendimento urgente imediato
+7. **NUNCA confirme horário sem a ferramenta confirm_appointment retornar sucesso**
 
 ## Como Responder
 - Perguntas sobre serviços/horários: Responda com base no conhecimento institucional
+- Agendamento: consulte horários com check_available_slots, reserve com reserve_slot e confirme apenas com confirm_appointment
 - Perguntas sobre saúde do pet: Mostre empatia, sugira consulta
 - Dúvidas que não sabe: "Não tenho essa informação específica, posso verificar com um atendente"
 - Situações de emergência: Escale imediatamente para atendimento humano
@@ -94,6 +97,12 @@ class OpenAIClient {
                 content: `Base de Conhecimento:\n${knowledgeContext}`,
             });
         }
+        if (context.schedulingState) {
+            messages.push({
+                role: 'system',
+                content: `Estado de agendamento:\n${JSON.stringify(context.schedulingState)}`,
+            });
+        }
         // Add conversation history
         for (const historyMsg of context.conversationHistory) {
             messages.push({ role: 'user', content: historyMsg });
@@ -104,6 +113,23 @@ class OpenAIClient {
             content: userMessage,
         });
         return messages;
+    }
+    async runToolCalls(messages, assistantMessage, context) {
+        messages.push(assistantMessage);
+        for (const toolCall of assistantMessage.tool_calls || []) {
+            if (toolCall.type !== 'function')
+                continue;
+            const result = await (0, agent_tools_1.executeAgentTool)(toolCall.function.name, toolCall.function.arguments, {
+                conversationId: context.conversationId,
+                contactId: context.contactId,
+                contactName: context.contactName,
+            });
+            messages.push({
+                role: 'tool',
+                tool_call_id: toolCall.id,
+                content: JSON.stringify(result),
+            });
+        }
     }
     /**
      * Generate a response using OpenAI
@@ -119,19 +145,34 @@ class OpenAIClient {
         metrics_1.metrics.incrementCounter(metrics_1.METRICS.OPENAI_REQUESTS_TOTAL);
         try {
             const messages = this.buildMessages(context, userMessage);
-            const response = await this.client.chat.completions.create({
-                model: this.model,
-                messages,
-                max_tokens: this.maxTokens,
-                temperature: this.temperature,
-            });
-            const content = response.choices[0]?.message?.content || FALLBACK_RESPONSE;
+            const tools = (0, agent_tools_1.getOpenAITools)();
+            let content = FALLBACK_RESPONSE;
+            let finishReason;
+            const maxToolRounds = 3;
+            for (let round = 0; round <= maxToolRounds; round++) {
+                const response = await this.client.chat.completions.create({
+                    model: this.model,
+                    messages,
+                    tools,
+                    tool_choice: 'auto',
+                    max_tokens: this.maxTokens,
+                    temperature: this.temperature,
+                });
+                const message = response.choices[0]?.message;
+                finishReason = response.choices[0]?.finish_reason;
+                if (message?.tool_calls?.length) {
+                    await this.runToolCalls(messages, message, context);
+                    continue;
+                }
+                content = message?.content || FALLBACK_RESPONSE;
+                break;
+            }
             const latency = Date.now() - startTime;
             metrics_1.metrics.recordHistogram(metrics_1.METRICS.OPENAI_REQUESTS_LATENCY, latency);
             metrics_1.metrics.incrementCounter(metrics_1.METRICS.OPENAI_REQUESTS_TOTAL, { status: 'success' });
             logging_1.logger.info('OpenAI response generated', {
                 contentLength: content.length,
-                finishReason: response.choices[0]?.finish_reason,
+                finishReason,
                 latency,
             });
             return {
@@ -179,5 +220,6 @@ class OpenAIClient {
         }
     }
 }
+exports.OpenAIClient = OpenAIClient;
 exports.openaiClient = new OpenAIClient();
 //# sourceMappingURL=client.js.map

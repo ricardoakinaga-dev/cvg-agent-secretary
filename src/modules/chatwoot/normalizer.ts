@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import {
   ChatwootWebhookPayload,
   ChatwootMessage,
@@ -29,7 +29,7 @@ export function normalizeMessage(
   }
 
   const normalized: NormalizedMessage = {
-    messageId: uuidv4(),
+    messageId: randomUUID(),
     chatwootMessageId: message.id,
     conversationId: payload.conversation.uuid,
     chatwootConversationId: payload.conversation.id,

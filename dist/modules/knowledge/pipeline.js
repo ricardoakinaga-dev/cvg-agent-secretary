@@ -5,6 +5,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.createChunksForDocument = createChunksForDocument;
 const repository_1 = require("./repository");
 const chunking_1 = require("./chunking");
+const retrieval_1 = require("./retrieval");
 async function createChunksForDocument(document, generateEmbeddings = true) {
     const chunks = await (0, chunking_1.chunkDocument)(document);
     if (chunks.length === 0) {
@@ -19,6 +20,7 @@ async function createChunksForDocument(document, generateEmbeddings = true) {
         }
     }
     const created = await repository_1.knowledgeRepository.createChunks(chunks);
+    await retrieval_1.knowledgeRetrievalService.addChunks(created);
     return created.length;
 }
 //# sourceMappingURL=pipeline.js.map

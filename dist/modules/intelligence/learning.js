@@ -1,12 +1,12 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.learningLoopService = exports.LearningLoopService = void 0;
-const uuid_1 = require("uuid");
+const crypto_1 = require("crypto");
 const logging_1 = require("../logging");
 const db_1 = require("../../shared/db");
 class LearningLoopService {
     async recordFeedback(input) {
-        const id = (0, uuid_1.v4)();
+        const id = (0, crypto_1.randomUUID)();
         const sql = `
       INSERT INTO response_feedback (
         id, conversation_id, message_id, query, response, quality,
@@ -124,7 +124,7 @@ class LearningLoopService {
         for (const failure of failures) {
             if (failure.count >= 3) {
                 insights.push({
-                    id: (0, uuid_1.v4)(),
+                    id: (0, crypto_1.randomUUID)(),
                     insightType: 'knowledge_gap',
                     description: `Frequent failures (${failure.count}) related to: ${failure.failureType.replace('_', ' ')}`,
                     evidence: failure.exampleQueries,

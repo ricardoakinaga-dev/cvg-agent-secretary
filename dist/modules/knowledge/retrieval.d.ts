@@ -18,6 +18,7 @@ declare class KnowledgeRetrievalService {
      * Search for relevant knowledge chunks
      */
     search(options: KnowledgeSearchOptions): Promise<RetrievalResult[]>;
+    addChunks(chunks: import('./types').KnowledgeChunk[]): Promise<void>;
     /**
      * Check if the service is healthy
      */

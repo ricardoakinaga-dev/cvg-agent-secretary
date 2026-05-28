@@ -3,6 +3,7 @@
 
 import { query } from '../../shared/db';
 import { auditService } from '../audit/service';
+import { logger } from '../logging';
 import { 
   KnowledgeDocument, 
   KnowledgeChunk, 
@@ -150,12 +151,142 @@ class KnowledgeRepository {
   }
 
   /**
+   * List documents for administrative review.
+   */
+  async listDocuments(filters: {
+    status?: KnowledgeDocumentStatus;
+    category?: KnowledgeCategory;
+    limit?: number;
+  } = {}): Promise<KnowledgeDocument[]> {
+    const clauses = ['is_active = true'];
+    const params: unknown[] = [];
+
+    if (filters.status) {
+      params.push(filters.status);
+      clauses.push(`status = $${params.length}`);
+    }
+
+    if (filters.category) {
+      params.push(filters.category);
+      clauses.push(`category = $${params.length}`);
+    }
+
+    params.push(filters.limit || 50);
+
+    const sql = `
+      SELECT * FROM knowledge_documents
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY updated_at DESC, created_at DESC
+      LIMIT $${params.length}
+    `;
+
+    const result = await query(sql, params);
+    return result.rows.map(this.mapRowToDocument);
+  }
+
+  /**
+   * Submit a draft/rejected document for review.
+   */
+  async submitForReview(id: string): Promise<KnowledgeDocument> {
+    const doc = await this.getDocument(id);
+    if (!doc) {
+      throw new Error(`Document not found: ${id}`);
+    }
+
+    if (!['draft', 'rejected'].includes(doc.status)) {
+      throw new Error(`Document cannot be submitted for review from status: ${doc.status}`);
+    }
+
+    return this.updateDocument({ id, status: 'pending_review' });
+  }
+
+  /**
+   * Approve a document after review. Approval does not publish content.
+   */
+  async approveDocument(id: string, approvedBy: string): Promise<KnowledgeDocument> {
+    const doc = await this.getDocument(id);
+    if (!doc) {
+      throw new Error(`Document not found: ${id}`);
+    }
+
+    if (doc.status !== 'pending_review') {
+      throw new Error(`Document must be pending_review before approval: ${doc.status}`);
+    }
+
+    const approved = await this.updateDocument({
+      id,
+      status: 'approved',
+      approvedBy,
+    });
+
+    await auditService.recordEvent({
+      eventType: 'knowledge_updated',
+      actor: approvedBy,
+      resourceType: 'knowledge_document',
+      resourceId: id,
+      action: 'approve',
+      details: {
+        title: approved.title,
+        category: approved.category,
+      },
+    });
+
+    return approved;
+  }
+
+  /**
+   * Reject a document and keep it out of retrieval.
+   */
+  async rejectDocument(id: string, rejectedBy: string, reason?: string): Promise<KnowledgeDocument> {
+    const doc = await this.getDocument(id);
+    if (!doc) {
+      throw new Error(`Document not found: ${id}`);
+    }
+
+    if (!['pending_review', 'draft'].includes(doc.status)) {
+      throw new Error(`Document cannot be rejected from status: ${doc.status}`);
+    }
+
+    const metadata = {
+      ...doc.metadata,
+      rejectionReason: reason,
+      rejectedBy,
+      rejectedAt: new Date().toISOString(),
+    };
+
+    const rejected = await this.updateDocument({
+      id,
+      status: 'rejected',
+      metadata,
+    });
+
+    await auditService.recordEvent({
+      eventType: 'knowledge_rejected',
+      actor: rejectedBy,
+      resourceType: 'knowledge_document',
+      resourceId: id,
+      action: 'reject',
+      details: {
+        title: rejected.title,
+        category: rejected.category,
+        reason,
+      },
+    });
+
+    return rejected;
+  }
+
+  /**
    * Approve and publish a document
    */
   async publishDocument(id: string, approvedBy: string): Promise<KnowledgeDocument> {
     const doc = await this.getDocument(id);
     if (!doc) {
       throw new Error(`Document not found: ${id}`);
+    }
+
+    if (doc.status !== 'approved') {
+      throw new Error(`Document must be approved before publication: ${doc.status}`);
     }
 
     await query(
@@ -184,7 +315,10 @@ class KnowledgeRepository {
       const { createChunksForDocument } = await import('./pipeline');
       await createChunksForDocument(publishedDoc);
     } catch (error) {
-      console.warn('Failed to create chunks for document:', (error as Error).message);
+      logger.warn('Failed to create chunks for document', {
+        documentId: id,
+        error: (error as Error).message,
+      });
     }
 
     // Audit trail for publication

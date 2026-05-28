@@ -7,6 +7,7 @@ import {
   KnowledgeCategory 
 } from './types';
 import { openaiClient } from '../openai/client';
+import { logger } from '../logging';
 
 export interface ChunkingOptions {
   chunkSize?: number;
@@ -58,7 +59,10 @@ export async function chunkDocument(
     chunks.push(createChunkInput(document, currentChunk.join(' '), chunkIndex));
   }
 
-  console.log(`Document ${document.id} chunked into ${chunks.length} chunks`);
+  logger.info('Document chunked', {
+    documentId: document.id,
+    chunksCount: chunks.length,
+  });
 
   return chunks;
 }

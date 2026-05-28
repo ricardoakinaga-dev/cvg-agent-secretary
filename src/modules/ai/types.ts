@@ -11,6 +11,9 @@ export interface GenerateInput {
 }
 
 export interface AgentContext {
+  conversationId?: string;
+  contactId?: string;
+  schedulingState?: unknown;
   contactName: string;
   conversationHistory: string[];
   memories: string[];

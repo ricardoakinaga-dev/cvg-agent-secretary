@@ -5,6 +5,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.chunkDocument = chunkDocument;
 exports.generateChunkEmbeddings = generateChunkEmbeddings;
 const client_1 = require("../openai/client");
+const logging_1 = require("../logging");
 const DEFAULT_OPTIONS = {
     chunkSize: 500,
     chunkOverlap: 50,
@@ -37,7 +38,10 @@ async function chunkDocument(document, options = {}) {
     if (currentChunk.length > 0) {
         chunks.push(createChunkInput(document, currentChunk.join(' '), chunkIndex));
     }
-    console.log(`Document ${document.id} chunked into ${chunks.length} chunks`);
+    logging_1.logger.info('Document chunked', {
+        documentId: document.id,
+        chunksCount: chunks.length,
+    });
     return chunks;
 }
 function createChunkInput(document, content, chunkIndex) {
