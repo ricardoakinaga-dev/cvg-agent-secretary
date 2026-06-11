@@ -1,4 +1,4 @@
-import crypto, { randomUUID } from 'crypto';
+import { randomUUID } from 'crypto';
 import { redisClient } from '../../shared/redis';
 import { logger } from '../logging';
 import { aiRouter } from '../ai/router';
@@ -10,10 +10,12 @@ import { handoffRepository } from '../handoff/repository';
 import { executeHandoff, getLabelsForIntent } from '../chatwoot/integration';
 import {
   checkGuardrails,
+  checkCommercialResponseGuardrails,
   checkResponseGuardrails,
   generateFallbackResponse,
+  sanitizeForPrompt,
 } from '../security/guardrails';
-import { classifyIntent } from '../intent/classifier';
+import { classifyIntent, getRecommendedAction } from '../intent/classifier';
 import { handleSchedulingStateMachine, markSchedulingIntent } from '../scheduling/state';
 import {
   loadConversationContext,
@@ -21,22 +23,134 @@ import {
   formatConversationHistory,
   shouldProcessConversation,
   loadContactAndMemories,
+  updateConversationState,
+  resetExpiredHandoff,
 } from '../conversations/contextLoader';
 import {
   normalizeMessage,
   isRelevantEvent,
   extractConversationMetadata,
+  getWebhookMessage,
+  isOutgoingMessage,
 } from '../chatwoot/normalizer';
 import { ChatwootWebhookPayload, AgentResponse, KnowledgeChunk } from '../../shared/types';
+import { generateContentDedupHash, generateMessageDedupHash } from './dedup';
+import {
+  buildKnowledgeContext,
+  hasHoursEvidence,
+  hasPriceEvidence,
+  isHoursQuery,
+  isPricingQuery,
+} from '../knowledge/context';
 
-/**
- * Generate message hash for deduplication
- */
-function generateMessageHash(conversationId: number, messageId: number, content: string): string {
-  return crypto
-    .createHash('sha256')
-    .update(`${conversationId}-${messageId}-${content}`)
-    .digest('hex');
+function createGreetingResponse(): AgentResponse {
+  return {
+    content: 'Olá! Sou a assistente virtual do Centro Veterinário Guarapiranga. Como posso ajudar?',
+    confidence: 1,
+    action: { type: 'respond', content: 'greeting' },
+  };
+}
+
+function sanitizeHistoryForPrompt(history: string[]): string[] {
+  return history.map((message) => sanitizeForPrompt(message));
+}
+
+function sanitizeMemoriesForPrompt(memories: string[]): string[] {
+  return memories.map((memory) => sanitizeForPrompt(memory));
+}
+
+async function sendBotMessage(conversationId: number, content: string): Promise<void> {
+  await redisClient.markBotOutgoingContent(conversationId, content);
+  const sentMessage = await chatwootClient.sendMessage({
+    conversationId,
+    content,
+  });
+  await redisClient.markBotOutgoingMessageId(sentMessage.id);
+}
+
+function normalizeForTakeoverDetection(content: string): string {
+  return content
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function looksLikeHumanOperatorMessage(content: string): boolean {
+  const text = normalizeForTakeoverDetection(content);
+
+  return [
+    /\bsou\s+(?:do|da)\s+centro\s+veterinario\s+guarapiranga\b/,
+    /\baqui\s+(?:e|é)\s+(?:do|da)\s+centro\s+veterinario\s+guarapiranga\b/,
+    /\bcentro\s+veterinario\s+guarapiranga\b.*\b(?:posso|podemos)\s+ajudar\b/,
+    /\b(?:posso|podemos)\s+ajudar\b.*\bcentro\s+veterinario\s+guarapiranga\b/,
+    /\bsou\s+(?:atendente|recepcionista|veterinari[oa])\b/,
+    /\bno\s+que\s+(?:posso|podemos)\s+ajudar\b/,
+  ].some(pattern => pattern.test(text));
+}
+
+async function pauseConversationForHumanTakeover(
+  payload: ChatwootWebhookPayload,
+  log: ReturnType<typeof logger.child>,
+  reason: string
+): Promise<void> {
+  const metadata = extractConversationMetadata(payload);
+  const context = await loadConversationContext(
+    metadata.conversationId,
+    metadata.chatwootConversationId,
+    metadata.contactId,
+    metadata.chatwootContactId,
+    metadata.contactName,
+    metadata.inboxId,
+    metadata.accountId
+  );
+
+  await updateConversationState(context, 'handoff', { reason });
+
+  log.info('Automation paused for human takeover', {
+    conversationId: context.conversationId,
+    chatwootConversationId: context.chatwootConversationId,
+    reason,
+  });
+}
+
+async function handleOutgoingMessage(
+  payload: ChatwootWebhookPayload,
+  log: ReturnType<typeof logger.child>
+): Promise<boolean> {
+  const webhookMessage = getWebhookMessage(payload);
+  if (!isOutgoingMessage(webhookMessage)) {
+    return false;
+  }
+
+  if (webhookMessage.private) {
+    log.info('Private outgoing message skipped');
+    return true;
+  }
+
+  const isKnownBotMessage = await redisClient.isBotOutgoingMessageId(webhookMessage.id);
+  const isPendingBotMessage = await redisClient.consumeBotOutgoingContent(
+    payload.conversation.id,
+    webhookMessage.content || ''
+  );
+
+  if (isKnownBotMessage || isPendingBotMessage) {
+    log.info('Bot outgoing message detected, skipping human takeover', {
+      chatwootMessageId: webhookMessage.id,
+    });
+    return true;
+  }
+
+  await pauseConversationForHumanTakeover(payload, log, 'outgoing_message');
+
+  log.info('Human outgoing message detected, automation paused for conversation', {
+    chatwootMessageId: webhookMessage.id,
+    senderType: webhookMessage.sender.type,
+    senderName: webhookMessage.sender.name,
+  });
+
+  return true;
 }
 
 /**
@@ -53,13 +167,15 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
   });
 
   try {
-    // Step 1: Check if event is relevant
+    if (await handleOutgoingMessage(payload, log)) {
+      return;
+    }
+
     if (!isRelevantEvent(payload)) {
       log.info('Event not relevant, skipping', { event: payload.event });
       return;
     }
 
-    // Step 2: Normalize the message
     const normalizedMessage = normalizeMessage(payload);
     if (!normalizedMessage) {
       log.warn('Failed to normalize message');
@@ -71,17 +187,25 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       chatwootMessageId: normalizedMessage.chatwootMessageId,
     });
 
+    if (looksLikeHumanOperatorMessage(normalizedMessage.content)) {
+      await pauseConversationForHumanTakeover(payload, log, 'operator_message_pattern');
+      log.info('Incoming message looks like human operator reply, skipping bot response', {
+        chatwootMessageId: normalizedMessage.chatwootMessageId,
+      });
+      return;
+    }
+
     const inputGuardrail = checkGuardrails(normalizedMessage.content);
-    if (!inputGuardrail.allowed || inputGuardrail.action === 'block') {
-      log.warn('Input guardrail blocked message', {
+    if (!inputGuardrail.allowed) {
+      log.warn('Input blocked by security guardrail', {
         reason: inputGuardrail.reason,
         action: inputGuardrail.action,
       });
 
-      await chatwootClient.sendMessage({
-        conversationId: payload.conversation.id,
-        content: generateFallbackResponse('handoff_needed'),
-      });
+      await sendBotMessage(
+        normalizedMessage.chatwootConversationId,
+        generateFallbackResponse(inputGuardrail.fallbackType || 'security_block')
+      );
 
       await analyticsService.trackEvent({
         eventType: 'fallback_triggered',
@@ -97,30 +221,46 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       return;
     }
 
-    // Track analytics event
+    const webhookMessage = getWebhookMessage(payload);
+    if (!webhookMessage) {
+      log.warn('Webhook message missing after relevance check');
+      return;
+    }
+
+    const messageHash = generateMessageDedupHash(
+      payload.conversation.id,
+      webhookMessage.id,
+      webhookMessage.content
+    );
+
+    const isNewMessage = await redisClient.setMessageHashIfAbsent(messageHash);
+    if (!isNewMessage) {
+      log.info('Duplicate message detected, skipping', { messageHash });
+      return;
+    }
+
+    const contentHash = generateContentDedupHash(
+      normalizedMessage.conversationId,
+      normalizedMessage.contactId,
+      normalizedMessage.content
+    );
+
+    const isNewContent = await redisClient.setContentHashIfAbsent(contentHash);
+    if (!isNewContent) {
+      log.info('Duplicate message content detected, skipping', {
+        contentHash,
+        conversationId: normalizedMessage.conversationId,
+        contactId: normalizedMessage.contactId,
+      });
+      return;
+    }
+
     await analyticsService.trackEvent({
       eventType: 'message_received',
       conversationId: normalizedMessage.conversationId,
       contactId: normalizedMessage.contactId,
     });
 
-    // Step 3: Check for duplicates
-    const messageHash = generateMessageHash(
-      payload.conversation.id,
-      payload.message!.id,
-      payload.message!.content
-    );
-
-    const isDuplicate = await redisClient.checkMessageHash(messageHash);
-    if (isDuplicate) {
-      log.info('Duplicate message detected, skipping', { messageHash });
-      return;
-    }
-
-    // Mark as processed
-    await redisClient.setMessageHash(messageHash);
-
-    // Step 4: Load conversation context
     const metadata = extractConversationMetadata(payload);
     const context = await loadConversationContext(
       metadata.conversationId,
@@ -131,8 +271,8 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       metadata.inboxId,
       metadata.accountId
     );
+    await resetExpiredHandoff(context);
 
-    // Step 5: Check if conversation should be processed
     if (!shouldProcessConversation(context)) {
       log.info('Conversation should not be processed', {
         conversationId: context.conversationId,
@@ -141,7 +281,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       return;
     }
 
-    // Step 6: Add message to context
     await addMessageToContext(context, normalizedMessage);
 
     const deterministicScheduling = await handleSchedulingStateMachine(
@@ -150,10 +289,7 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
     );
 
     if (deterministicScheduling.handled && deterministicScheduling.message) {
-      await chatwootClient.sendMessage({
-        conversationId: context.chatwootConversationId,
-        content: deterministicScheduling.message,
-      });
+      await sendBotMessage(context.chatwootConversationId, deterministicScheduling.message);
 
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -170,45 +306,64 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       return;
     }
 
-    const intent = classifyIntent(normalizedMessage.content, {
-      conversationHistory: formatConversationHistory(context.messages.slice(0, -1)),
+    const conversationHistory = sanitizeHistoryForPrompt(
+      formatConversationHistory(context.messages.slice(0, -1))
+    );
+    const intentClassification = classifyIntent(normalizedMessage.content, {
+      conversationHistory,
+      contactName: metadata.contactName,
     });
+    const recommendedAction = getRecommendedAction(intentClassification);
     const schedulingState = await markSchedulingIntent(
       context.conversationId,
-      intent.intent,
-      intent.entities.petName
+      intentClassification.intent,
+      intentClassification.entities.petName
     );
 
-    // Step 7: Prepare agent context (Phase 2 - include memory)
+    log.info('Runtime intent decision', {
+      intent: intentClassification.intent,
+      confidence: intentClassification.confidence,
+      shouldUseKnowledge: recommendedAction.shouldUseKnowledge,
+    });
+
     const memoryContext = await loadContactAndMemories(
       metadata.chatwootContactId,
       metadata.contactName
     );
 
-    // Step 8: Search knowledge base (Phase 3)
     let knowledgeResults: KnowledgeChunk[] = [];
-    try {
-      const knowledgeSearchResults = await knowledgeRetrievalService.search({
-        query: normalizedMessage.content,
-        limit: 3,
-        minRelevance: 0.7,
-      });
+    if (recommendedAction.shouldUseKnowledge) {
+      try {
+        const knowledgeSearchResults = await knowledgeRetrievalService.search({
+          query: normalizedMessage.content,
+          limit: 3,
+          minRelevance: 0.7,
+        });
 
-      knowledgeResults = knowledgeSearchResults.map(r => ({
-        id: r.id,
-        content: r.content,
-        source: r.source,
-        relevance: r.relevance,
-        category: r.category,
-        title: r.title,
-      }));
+        const rawKnowledgeResults = knowledgeSearchResults.map(r => ({
+          id: r.id,
+          content: r.content,
+          source: r.source,
+          relevance: r.relevance,
+          category: r.category,
+          title: r.title,
+        }));
+        knowledgeResults = buildKnowledgeContext(normalizedMessage.content, rawKnowledgeResults);
 
-      logger.info('Knowledge search completed', {
-        resultsCount: knowledgeResults.length,
+        logger.info('Knowledge search completed', {
+          resultsCount: knowledgeResults.length,
+          pricingQuery: isPricingQuery(normalizedMessage.content),
+          hasPriceEvidence: hasPriceEvidence(knowledgeResults),
+          hoursQuery: isHoursQuery(normalizedMessage.content),
+          hasHoursEvidence: hasHoursEvidence(knowledgeResults),
+        });
+      } catch (knowledgeError) {
+        logger.error('Knowledge search failed', knowledgeError as Error, {});
+      }
+    } else {
+      logger.info('Knowledge search skipped by intent decision', {
+        intent: intentClassification.intent,
       });
-    } catch (knowledgeError) {
-      logger.error('Knowledge search failed', knowledgeError as Error, {});
-      // Continue without knowledge - don't fail the whole flow
     }
 
     const agentContext = {
@@ -216,71 +371,81 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       contactId: memoryContext.contactId ?? context.contactId,
       schedulingState,
       contactName: metadata.contactName,
-      conversationHistory: formatConversationHistory(context.messages.slice(0, -1)),
-      memories: memoryContext.memories as string[],
+      conversationHistory,
+      memories: sanitizeMemoriesForPrompt(memoryContext.memories as string[]),
       pets: memoryContext.pets,
       knowledge: knowledgeResults,
     };
+    const safeUserMessage = sanitizeForPrompt(normalizedMessage.content);
 
-    // Store contactId in context for tool usage
     const contextWithContact = context as typeof context & { contactId: string };
     contextWithContact.contactId = memoryContext.contactId ?? context.contactId;
 
-    // Step 8: Call AI to generate response
-    log.info('Calling AI', { contactName: metadata.contactName, provider: aiRouter.getPrimaryProvider() });
-
     let agentResponse: AgentResponse;
-    try {
-      const aiResponse = await aiRouter.generate({
-        message: normalizedMessage.content,
-        context: agentContext
-      });
+    if (intentClassification.intent === 'saudacao') {
+      agentResponse = createGreetingResponse();
+    } else if (isPricingQuery(normalizedMessage.content) && !hasPriceEvidence(knowledgeResults)) {
       agentResponse = {
-        content: aiResponse.content,
-        confidence: aiResponse.confidence,
-        action: aiResponse.action as AgentResponse['action'],
-      };
-    } catch (error) {
-      log.error('AI error, using fallback', error as Error);
-      agentResponse = {
-        content: 'Peço desculpas, estou tendo dificuldades para processar sua solicitação. Um de nossos atendentes logoirá ajudá-lo.',
+        content: generateFallbackResponse('no_knowledge'),
         confidence: 0,
-        action: { type: 'fallback', reason: 'ai_error' },
+        action: { type: 'fallback', reason: 'pricing_without_knowledge' },
       };
-      
-      // Track fallback event
-      await analyticsService.trackEvent({
-        eventType: 'fallback_triggered',
-        conversationId: context.conversationId,
-        contactId: context.contactId,
-        provider: aiRouter.getPrimaryProvider(),
-        metadata: {
-          reason: 'ai_error',
-          error: (error as Error).message,
-        },
-      });
+    } else if (isHoursQuery(normalizedMessage.content) && !hasHoursEvidence(knowledgeResults)) {
+      agentResponse = {
+        content: generateFallbackResponse('no_knowledge'),
+        confidence: 0,
+        action: { type: 'fallback', reason: 'hours_without_knowledge' },
+      };
+    } else {
+      log.info('Calling AI', { contactName: metadata.contactName, provider: aiRouter.getPrimaryProvider() });
+
+      try {
+        const aiResponse = await aiRouter.generate({
+          message: safeUserMessage,
+          context: agentContext,
+        });
+        agentResponse = {
+          content: aiResponse.content,
+          confidence: aiResponse.confidence,
+          action: aiResponse.action as AgentResponse['action'],
+        };
+      } catch (error) {
+        log.error('AI error, using fallback', error as Error);
+        agentResponse = {
+          content: 'Peço desculpas, estou tendo dificuldades para processar sua solicitação. Um de nossos atendentes logo irá ajudá-lo.',
+          confidence: 0,
+          action: { type: 'fallback', reason: 'ai_error' },
+        };
+
+        await analyticsService.trackEvent({
+          eventType: 'fallback_triggered',
+          conversationId: context.conversationId,
+          contactId: context.contactId,
+          provider: aiRouter.getPrimaryProvider(),
+          metadata: {
+            reason: 'ai_error',
+            error: (error as Error).message,
+          },
+        });
+      }
     }
 
-    log.info('Agent response generated', {
-      contentLength: agentResponse.content.length,
-      confidence: agentResponse.confidence,
-    });
-
     const responseGuardrail = checkResponseGuardrails(agentResponse.content);
-    if (!responseGuardrail.allowed) {
-      log.warn('Response guardrail intercepted AI response', {
-        reason: responseGuardrail.reason,
-        action: responseGuardrail.action,
-      });
-
+    const commercialGuardrail = checkCommercialResponseGuardrails(
+      normalizedMessage.content,
+      agentResponse.content,
+      knowledgeResults
+    );
+    if (!responseGuardrail.allowed || !commercialGuardrail.allowed) {
+      const fallbackType = commercialGuardrail.fallbackType || responseGuardrail.fallbackType || 'low_confidence';
       agentResponse = {
-        content: generateFallbackResponse('handoff_needed'),
+        content: generateFallbackResponse(fallbackType),
         confidence: 0,
         action: {
-          type: 'handoff',
-          reason: responseGuardrail.reason || 'response_guardrail',
-          summary: 'Resposta automatica bloqueada por guardrail de seguranca.',
-        },
+          type: fallbackType === 'handoff_needed' ? 'handoff' : 'fallback',
+          reason: commercialGuardrail.reason || responseGuardrail.reason || 'response_guardrail',
+          summary: 'Resposta bloqueada por guardrail',
+        } as AgentResponse['action'],
       };
 
       await analyticsService.trackEvent({
@@ -290,21 +455,21 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
         provider: aiRouter.getPrimaryProvider(),
         metadata: {
           reason: 'response_guardrail_blocked',
-          guardrailReason: responseGuardrail.reason,
+          guardrailReason: commercialGuardrail.reason || responseGuardrail.reason,
         },
       });
     }
 
-    // Step 10: Send response to Chatwoot
+    log.info('Agent response generated', {
+      contentLength: agentResponse.content.length,
+      confidence: agentResponse.confidence,
+    });
+
     try {
-      await chatwootClient.sendMessage({
-        conversationId: context.chatwootConversationId,
-        content: agentResponse.content,
-      });
+      await sendBotMessage(context.chatwootConversationId, agentResponse.content);
 
       log.info('Response sent to Chatwoot');
-      
-      // Track analytics event
+
       await analyticsService.trackEvent({
         eventType: 'response_sent',
         conversationId: context.conversationId,
@@ -316,7 +481,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
         },
       });
 
-      // Track handoff if action requires it
       if (agentResponse.action?.type === 'handoff') {
         let handoffId: string | undefined;
         try {
@@ -378,7 +542,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
           },
         });
 
-        // Audit trail for handoff
         await auditService.recordEvent({
           eventType: 'handoff_triggered',
           actor: 'system',
@@ -395,8 +558,7 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       }
     } catch (error) {
       log.error('Failed to send response to Chatwoot', error as Error);
-      
-      // Track error
+
       await analyticsService.trackEvent({
         eventType: 'error_occurred',
         conversationId: context.conversationId,
@@ -406,8 +568,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
           error: (error as Error).message,
         },
       });
-      
-      // Don't throw - we don't want to retry the whole flow
     }
 
     log.info('Webhook processing completed', {
@@ -429,10 +589,9 @@ export async function processConversationCreated(payload: ChatwootWebhookPayload
 
   log.info('Conversation created', {
     conversationId: String(payload.conversation.id),
-    contactName: payload.conversation.contact.name,
+    contactName: extractConversationMetadata(payload).contactName,
   });
 
-  // Track conversation started
   const metadata = extractConversationMetadata(payload);
   await analyticsService.trackEvent({
     eventType: 'conversation_started',
@@ -440,7 +599,6 @@ export async function processConversationCreated(payload: ChatwootWebhookPayload
     contactId: metadata.contactId,
   });
 
-  // Just load/create context - don't generate response
   await loadConversationContext(
     metadata.conversationId,
     metadata.chatwootConversationId,

@@ -1,5 +1,15 @@
 // Tests for Intent Classifier - Phase 4
 
+jest.mock('../../src/modules/logging', () => ({
+  logger: {
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+    child: jest.fn().mockReturnThis(),
+  },
+}));
+
 import { classifyIntent, getRecommendedAction } from '../../src/modules/intent/classifier';
 
 describe('Intent Classifier', () => {
@@ -204,5 +214,11 @@ describe('Recommended Action', () => {
     const classification = classifyIntent('Qual o horário?');
     const action = getRecommendedAction(classification);
     expect(action.responseTone).toBe('informative');
+  });
+
+  it('should not use knowledge for greetings', () => {
+    const classification = classifyIntent('Olá');
+    const action = getRecommendedAction(classification);
+    expect(action.shouldUseKnowledge).toBe(false);
   });
 });

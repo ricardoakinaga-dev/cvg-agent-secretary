@@ -6,9 +6,10 @@ import { logger } from '../logging';
 import { config } from '../../config';
 import { openaiClient } from '../openai/client';
 import { knowledgeRepository } from './repository';
-import { QdrantVectorStore } from './qdrant';
 import { metrics, METRICS } from '../../shared/metrics';
 import { redisClient } from '../../shared/redis';
+import { QdrantHybridStore } from './qdrant-store';
+import { isHoursQuery } from './context';
 import {
   KnowledgeSearchOptions,
   KnowledgeSearchResult,
@@ -29,6 +30,28 @@ const DEFAULT_CONFIG: RetrievalConfig = {
   chunkSize: 500,
   chunkOverlap: 50,
 };
+
+function buildVectorSearchQuery(query: string): string {
+  if (!isHoursQuery(query)) {
+    if (/\bconsulta\b/i.test(query) && /\bcomo\s+funciona\b/i.test(query)) {
+      return [
+        'Centro Veterinario Guarapiranga',
+        'recepcao jornada tutor consulta agendada encaixe atendimento prioritario',
+        'cadastro nome tutor telefone nome pet especie queixa principal',
+        query,
+      ].join(' ');
+    }
+
+    return query;
+  }
+
+  return [
+    'Centro Veterinario Guarapiranga',
+    'horario atendimento consulta',
+    'atendimento veterinario 24h 7 dias por semana',
+    query,
+  ].join(' ');
+}
 
 /**
  * Fallback Vector Store using PostgreSQL full-text search
@@ -90,9 +113,39 @@ class KnowledgeRetrievalService {
 
   constructor() {
     this.config = DEFAULT_CONFIG;
-    this.vectorStore = config.qdrant.url
-      ? new QdrantVectorStore(this.config.embeddingDimensions)
+    this.vectorStore = config.knowledge.vectorStore === 'qdrant'
+      ? new QdrantHybridStore()
       : new PostgresFullTextStore();
+  }
+
+  private async generateValidEmbedding(query: string): Promise<number[]> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        const embedding = await openaiClient.generateEmbedding(query);
+        if (embedding.length === this.config.embeddingDimensions) {
+          return embedding;
+        }
+
+        lastError = new Error(
+          `Invalid embedding dimension: expected ${this.config.embeddingDimensions}, got ${embedding.length}`
+        );
+        logger.warn('Generated embedding has invalid dimension', {
+          attempt,
+          expected: this.config.embeddingDimensions,
+          actual: embedding.length,
+        });
+      } catch (error) {
+        lastError = error as Error;
+        logger.warn('Embedding generation failed', {
+          attempt,
+          error: lastError.message,
+        });
+      }
+    }
+
+    throw lastError || new Error('Embedding generation failed');
   }
 
   /**
@@ -118,12 +171,14 @@ class KnowledgeRetrievalService {
         this.vectorStore = new PostgresFullTextStore();
         await this.vectorStore.initialize();
         this.useVectorStore = false;
+        this.vectorStore = new PostgresFullTextStore();
       }
     } catch (error) {
       logger.warn('Vector store initialization failed, using PostgreSQL fallback', { error: error as Error });
       this.vectorStore = new PostgresFullTextStore();
       await this.vectorStore.initialize();
       this.useVectorStore = false;
+      this.vectorStore = new PostgresFullTextStore();
     }
 
     this.isInitialized = true;
@@ -133,6 +188,10 @@ class KnowledgeRetrievalService {
    * Search for relevant knowledge chunks
    */
   async search(options: KnowledgeSearchOptions): Promise<RetrievalResult[]> {
+    if (!this.isInitialized) {
+      await this.initialize();
+    }
+
     const { 
       query, 
       category, 
@@ -144,18 +203,20 @@ class KnowledgeRetrievalService {
 
     try {
       let results: KnowledgeSearchResult[] = [];
+      const vectorSearchQuery = buildVectorSearchQuery(query);
 
-      if (this.useVectorStore) {
+      if (config.knowledge.vectorStore === 'qdrant' && this.useVectorStore) {
         // Check embedding cache first
         let embedding: number[] | null = null;
         try {
-          embedding = await redisClient.getEmbeddingCache(query);
-          if (embedding) {
+          embedding = await redisClient.getEmbeddingCache(vectorSearchQuery);
+          if (embedding && embedding.length === this.config.embeddingDimensions) {
             metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_TOTAL, { cache: 'hit' });
-            logger.debug('Embedding cache hit', { query: query.substring(0, 50) });
+            logger.debug('Embedding cache hit', { query: vectorSearchQuery.substring(0, 50) });
           } else {
+            embedding = null;
             metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_TOTAL, { cache: 'miss' });
-            logger.debug('Embedding cache miss', { query: query.substring(0, 50) });
+            logger.debug('Embedding cache miss', { query: vectorSearchQuery.substring(0, 50) });
           }
         } catch (cacheError) {
           logger.warn('Embedding cache read failed', { error: (cacheError as Error).message });
@@ -163,15 +224,21 @@ class KnowledgeRetrievalService {
 
         // Generate embedding if not cached
         if (!embedding) {
-          embedding = await openaiClient.generateEmbedding(query);
+          embedding = await this.generateValidEmbedding(vectorSearchQuery);
           try {
-            await redisClient.setEmbeddingCache(query, embedding);
+            await redisClient.setEmbeddingCache(vectorSearchQuery, embedding);
           } catch (cacheError) {
             logger.warn('Embedding cache write failed', { error: (cacheError as Error).message });
           }
         }
 
-        results = await this.vectorStore.search(query, embedding, {
+        if (embedding.length !== this.config.embeddingDimensions) {
+          throw new Error(
+            `Invalid embedding dimension before vector search: expected ${this.config.embeddingDimensions}, got ${embedding.length}`
+          );
+        }
+
+        results = await this.vectorStore.search(vectorSearchQuery, embedding, {
           limit,
           minRelevance,
           category,
@@ -211,7 +278,7 @@ class KnowledgeRetrievalService {
       metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_ERRORS, { error: 'search_failed' });
       
       // Try fallback to full-text search if vector store failed
-      if (this.useVectorStore) {
+      if (config.knowledge.vectorStore === 'qdrant' && this.useVectorStore) {
         logger.info('Attempting fallback to full-text search');
         metrics.incrementCounter(METRICS.KNOWLEDGE_FALLBACK_USED);
         try {
@@ -221,15 +288,17 @@ class KnowledgeRetrievalService {
             limit,
           });
 
-          return fallbackResults.map(chunk => ({
-            id: chunk.id,
-            content: chunk.content,
-            source: chunk.source,
-            relevance: 0.6, // Lower relevance for fallback
-            category: chunk.category,
-            title: chunk.title,
-            documentVersion: chunk.version,
-          }));
+          return fallbackResults
+            .map(chunk => ({
+              id: chunk.id,
+              content: chunk.content,
+              source: chunk.source,
+              relevance: 0.6, // Lower relevance for fallback
+              category: chunk.category,
+              title: chunk.title,
+              documentVersion: chunk.version,
+            }))
+            .filter(result => result.relevance >= minRelevance);
         } catch (fallbackError) {
           logger.error('Fallback search also failed', fallbackError as Error);
           metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_ERRORS, { error: 'fallback_failed' });

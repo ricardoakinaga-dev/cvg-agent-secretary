@@ -2,6 +2,7 @@ import {
   normalizeMessage,
   isRelevantEvent,
   extractConversationMetadata,
+  normalizeChatwootMessageType,
 } from '../../src/modules/chatwoot/normalizer';
 import { ChatwootWebhookPayload } from '../../src/shared/types';
 
@@ -40,6 +41,15 @@ const createMockPayload = (overrides: Partial<ChatwootWebhookPayload> = {}): Cha
 });
 
 describe('Chatwoot Normalizer', () => {
+  describe('normalizeChatwootMessageType', () => {
+    it('should normalize string and numeric Chatwoot message types', () => {
+      expect(normalizeChatwootMessageType('incoming')).toBe('incoming');
+      expect(normalizeChatwootMessageType(0)).toBe('incoming');
+      expect(normalizeChatwootMessageType('outgoing')).toBe('outgoing');
+      expect(normalizeChatwootMessageType(1)).toBe('outgoing');
+    });
+  });
+
   describe('normalizeMessage', () => {
     it('should normalize a valid incoming message', () => {
       const payload = createMockPayload();
@@ -73,6 +83,40 @@ describe('Chatwoot Normalizer', () => {
 
       const result = normalizeMessage(payload);
       expect(result).toBeNull();
+    });
+
+    it('should normalize incoming messages even when Chatwoot sender type is user', () => {
+      const payload = createMockPayload({
+        message: {
+          id: 1111111111,
+          content: 'Incoming webhook with user sender type',
+          message_type: 'incoming',
+          sender: { id: 1, name: 'Cliente no webhook', type: 'user' },
+          attachments: [],
+          private: false,
+        },
+      });
+
+      const result = normalizeMessage(payload);
+      expect(result).not.toBeNull();
+      expect(result?.content).toBe('Incoming webhook with user sender type');
+    });
+
+    it('should normalize numeric incoming messages from contacts', () => {
+      const payload = createMockPayload({
+        message: {
+          id: 1111111111,
+          content: 'Mensagem numérica do Chatwoot',
+          message_type: 0,
+          sender: { id: 67890, name: 'Maria Santos', type: 'contact' },
+          attachments: [],
+          private: false,
+        },
+      });
+
+      const result = normalizeMessage(payload);
+      expect(result).not.toBeNull();
+      expect(result?.content).toBe('Mensagem numérica do Chatwoot');
     });
 
     it('should return null for private messages', () => {
@@ -148,6 +192,21 @@ describe('Chatwoot Normalizer', () => {
       });
 
       expect(isRelevantEvent(payload)).toBe(false);
+    });
+
+    it('should return true for incoming messages even when Chatwoot sender type is user', () => {
+      const payload = createMockPayload({
+        message: {
+          id: 1111111111,
+          content: 'Incoming webhook with user sender type',
+          message_type: 'incoming',
+          sender: { id: 1, name: 'Cliente no webhook', type: 'user' },
+          attachments: [],
+          private: false,
+        },
+      });
+
+      expect(isRelevantEvent(payload)).toBe(true);
     });
 
     it('should return false for private messages', () => {

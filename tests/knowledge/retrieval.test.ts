@@ -30,6 +30,19 @@ jest.mock('../../src/modules/logging', () => ({
 
 jest.mock('../../src/config', () => ({
   config: {
+    knowledge: {
+      vectorStore: 'postgres',
+    },
+    qdrant: {
+      url: 'http://qdrant:6333',
+      collection: 'test',
+      vectorName: 'dense',
+      sparseVectorName: 'sparse',
+      prefetchLimit: 50,
+      scoreThreshold: 0,
+      createCollection: false,
+      readOnly: true,
+    },
     openai: {
       apiKey: 'test-key',
     },
@@ -43,6 +56,7 @@ describe('KnowledgeRetrievalService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (knowledgeRepository.getPublishedDocuments as jest.Mock).mockResolvedValue([]);
     retrievalService = new KnowledgeRetrievalService();
   });
 

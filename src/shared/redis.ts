@@ -77,8 +77,49 @@ class RedisClient {
     await this.getClient().setex(key, ttlSeconds, '1');
   }
 
+  async setMessageHashIfAbsent(hash: string, ttlSeconds = 3600): Promise<boolean> {
+    const key = `message:hash:${hash}`;
+    const result = await this.getClient().set(key, '1', 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  }
+
+  async setContentHashIfAbsent(hash: string, ttlSeconds = 300): Promise<boolean> {
+    const key = `message:content-hash:${hash}`;
+    const result = await this.getClient().set(key, '1', 'EX', ttlSeconds, 'NX');
+    return result === 'OK';
+  }
+
   async checkMessageHash(hash: string): Promise<boolean> {
     const key = `message:hash:${hash}`;
+    const result = await this.getClient().exists(key);
+    return result === 1;
+  }
+
+  async markBotOutgoingContent(
+    chatwootConversationId: number,
+    content: string,
+    ttlSeconds = 300
+  ): Promise<void> {
+    const key = `bot:outgoing:content:${chatwootConversationId}:${this.hashText(content)}`;
+    await this.getClient().setex(key, ttlSeconds, '1');
+  }
+
+  async consumeBotOutgoingContent(
+    chatwootConversationId: number,
+    content: string
+  ): Promise<boolean> {
+    const key = `bot:outgoing:content:${chatwootConversationId}:${this.hashText(content)}`;
+    const result = await this.getClient().del(key);
+    return result > 0;
+  }
+
+  async markBotOutgoingMessageId(messageId: number, ttlSeconds = 3600): Promise<void> {
+    const key = `bot:outgoing:message:${messageId}`;
+    await this.getClient().setex(key, ttlSeconds, '1');
+  }
+
+  async isBotOutgoingMessageId(messageId: number): Promise<boolean> {
+    const key = `bot:outgoing:message:${messageId}`;
     const result = await this.getClient().exists(key);
     return result === 1;
   }

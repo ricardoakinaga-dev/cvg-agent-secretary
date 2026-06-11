@@ -23,6 +23,20 @@ export interface AppConfig {
     url: string;
     password?: string;
   };
+  knowledge: {
+    vectorStore: 'postgres' | 'qdrant';
+  };
+  qdrant: {
+    url: string;
+    apiKey: string;
+    collection: string;
+    vectorName: string;
+    sparseVectorName: string;
+    prefetchLimit: number;
+    scoreThreshold: number;
+    createCollection: boolean;
+    readOnly: boolean;
+  };
   openai: {
     apiKey: string;
     model: string;
@@ -43,10 +57,8 @@ export interface AppConfig {
   auth: {
     apiToken: string;
   };
-  qdrant: {
-    url: string;
-    apiKey: string;
-    collection: string;
+  conversation: {
+    handoffTimeoutMinutes: number;
   };
   logging: {
     level: string;
@@ -91,6 +103,20 @@ export const config: AppConfig = {
     url: getRequiredEnv('REDIS_URL'),
     password: getOptionalEnv('REDIS_PASSWORD', ''),
   },
+  knowledge: {
+    vectorStore: getOptionalEnv('KNOWLEDGE_VECTOR_STORE', 'postgres') as 'postgres' | 'qdrant',
+  },
+  qdrant: {
+    url: getOptionalEnv('QDRANT_URL', 'http://127.0.0.1:6333'),
+    apiKey: getOptionalEnv('QDRANT_API_KEY', ''),
+    collection: getOptionalEnv('QDRANT_COLLECTION', 'cvg_agent_secretary'),
+    vectorName: getOptionalEnv('QDRANT_VECTOR_NAME', 'dense'),
+    sparseVectorName: getOptionalEnv('QDRANT_SPARSE_VECTOR_NAME', 'sparse'),
+    prefetchLimit: parseInt(getOptionalEnv('QDRANT_PREFETCH_LIMIT', '50'), 10),
+    scoreThreshold: parseFloat(getOptionalEnv('QDRANT_SCORE_THRESHOLD', '0')),
+    createCollection: getOptionalEnv('QDRANT_CREATE_COLLECTION', 'false') === 'true',
+    readOnly: getOptionalEnv('QDRANT_READ_ONLY', 'true') !== 'false',
+  },
   openai: {
     apiKey: getRequiredEnv('OPENAI_API_KEY'),
     model: getOptionalEnv('OPENAI_MODEL', 'gpt-4'),
@@ -111,10 +137,8 @@ export const config: AppConfig = {
   auth: {
     apiToken: getOptionalEnv('API_ADMIN_TOKEN', ''),
   },
-  qdrant: {
-    url: getOptionalEnv('QDRANT_URL', ''),
-    apiKey: getOptionalEnv('QDRANT_API_KEY', ''),
-    collection: getOptionalEnv('QDRANT_COLLECTION', 'cvg_knowledge_chunks'),
+  conversation: {
+    handoffTimeoutMinutes: parseInt(getOptionalEnv('HANDOFF_TIMEOUT_MINUTES', '10'), 10),
   },
   logging: {
     level: getOptionalEnv('LOG_LEVEL', 'info'),
@@ -125,12 +149,17 @@ export const config: AppConfig = {
 export function validateConfig(): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
 
-  // Check required secrets
   if (!config.database.url) errors.push('DATABASE_URL is required');
   if (!config.redis.url) errors.push('REDIS_URL is required');
+  if (!['postgres', 'qdrant'].includes(config.knowledge.vectorStore)) {
+    errors.push('KNOWLEDGE_VECTOR_STORE must be postgres or qdrant');
+  }
   if (!config.openai.apiKey) errors.push('OPENAI_API_KEY is required');
   if (!config.chatwoot.apiToken) errors.push('CHATWOOT_API_TOKEN is required');
   if (!config.chatwoot.accountId) errors.push('CHATWOOT_ACCOUNT_ID is required');
+  if (!Number.isFinite(config.conversation.handoffTimeoutMinutes) || config.conversation.handoffTimeoutMinutes < 1) {
+    errors.push('HANDOFF_TIMEOUT_MINUTES must be a positive number');
+  }
 
   if (config.isProduction) {
     if (!config.chatwoot.webhookSecret) {
@@ -162,6 +191,18 @@ export function getSafeConfig(): Record<string, unknown> {
     redis: {
       url: config.redis.url.replace(/:[^@]+@/, ':***@'),
     },
+    knowledge: config.knowledge,
+    qdrant: {
+      urlConfigured: Boolean(config.qdrant.url),
+      collection: config.qdrant.collection,
+      vectorName: config.qdrant.vectorName,
+      sparseVectorName: config.qdrant.sparseVectorName,
+      prefetchLimit: config.qdrant.prefetchLimit,
+      scoreThreshold: config.qdrant.scoreThreshold,
+      createCollection: config.qdrant.createCollection,
+      readOnly: config.qdrant.readOnly,
+      apiKeyConfigured: Boolean(config.qdrant.apiKey),
+    },
     openai: {
       model: config.openai.model,
       maxTokens: config.openai.maxTokens,
@@ -175,10 +216,7 @@ export function getSafeConfig(): Record<string, unknown> {
     auth: {
       apiTokenConfigured: Boolean(config.auth.apiToken),
     },
-    qdrant: {
-      urlConfigured: Boolean(config.qdrant.url),
-      collection: config.qdrant.collection,
-    },
+    conversation: config.conversation,
     logging: config.logging,
   };
 }

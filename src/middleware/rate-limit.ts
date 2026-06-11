@@ -8,7 +8,7 @@ export const apiLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, error: 'Too many requests, please try again later' },
   keyGenerator: (req) => {
-    return (req.headers['x-correlation-id'] as string) || ipKeyGenerator(req.ip || 'unknown');
+    return req.ip ? ipKeyGenerator(req.ip, 56) : 'unknown';
   },
   handler: (req, res) => {
     logger.warn('Rate limit exceeded', { 
@@ -30,7 +30,7 @@ export const webhookLimiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, error: 'Webhook rate limit exceeded' },
   keyGenerator: (req) => {
-    return (req.headers['x-chatwoot-account-id'] as string) || ipKeyGenerator(req.ip || 'unknown');
+    return (req.headers['x-chatwoot-account-id'] as string) || (req.ip ? ipKeyGenerator(req.ip, 56) : 'unknown');
   },
   handler: (req, res) => {
     logger.warn('Webhook rate limit exceeded', { 

@@ -1,5 +1,6 @@
 import { redisClient } from '../../shared/redis';
 import { logger } from '../logging';
+import { config } from '../../config';
 import {
   ConversationContext,
   ConversationMetadata,
@@ -147,12 +148,55 @@ export function shouldProcessConversation(context: ConversationContext): boolean
   return true;
 }
 
+export function isHandoffExpired(
+  context: ConversationContext,
+  now: Date = new Date()
+): boolean {
+  if (context.state !== 'handoff') {
+    return false;
+  }
+
+  if (!context.metadata.handoffUntil) {
+    return true;
+  }
+
+  const handoffUntil = new Date(context.metadata.handoffUntil);
+  if (Number.isNaN(handoffUntil.getTime())) {
+    return true;
+  }
+
+  return handoffUntil.getTime() <= now.getTime();
+}
+
+export async function resetExpiredHandoff(
+  context: ConversationContext,
+  now: Date = new Date()
+): Promise<boolean> {
+  if (!isHandoffExpired(context, now)) {
+    return false;
+  }
+
+  logger.info('Handoff expired, resuming automation', {
+    conversationId: context.conversationId,
+    handoffStartedAt: context.metadata.handoffStartedAt,
+    handoffUntil: context.metadata.handoffUntil,
+  });
+
+  context.state = 'in_progress';
+  delete context.metadata.handoffStartedAt;
+  delete context.metadata.handoffUntil;
+  delete context.metadata.handoffReason;
+  await saveConversationContext(context);
+  return true;
+}
+
 /**
  * Update conversation state
  */
 export async function updateConversationState(
   context: ConversationContext,
-  newState: ConversationState
+  newState: ConversationState,
+  options: { reason?: string; now?: Date; handoffTimeoutMinutes?: number } = {}
 ): Promise<void> {
   logger.info('Updating conversation state', {
     conversationId: context.conversationId,
@@ -161,6 +205,21 @@ export async function updateConversationState(
   });
 
   context.state = newState;
+
+  if (newState === 'handoff') {
+    const now = options.now || new Date();
+    const handoffTimeoutMinutes = options.handoffTimeoutMinutes || config.conversation.handoffTimeoutMinutes;
+    const handoffUntil = new Date(now.getTime() + handoffTimeoutMinutes * 60 * 1000);
+
+    context.metadata.handoffStartedAt = now.toISOString();
+    context.metadata.handoffUntil = handoffUntil.toISOString();
+    context.metadata.handoffReason = options.reason;
+  } else {
+    delete context.metadata.handoffStartedAt;
+    delete context.metadata.handoffUntil;
+    delete context.metadata.handoffReason;
+  }
+
   await saveConversationContext(context);
 }
 

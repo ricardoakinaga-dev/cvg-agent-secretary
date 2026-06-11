@@ -187,7 +187,7 @@ const HOURS_PATTERNS: RegExp[] = [
  */
 const PRICE_PATTERNS: RegExp[] = [
   /preço|valor|custo|quanto\s+(?:custa|vai|cobram)|valor\s+da/i,
-  /orcamento|orçar|cobrar/i,
+  /or[cç]amento|orçar|orcar|cobrar/i,
   /barato|caro|pesado/i,
 ];
 
@@ -430,33 +430,20 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 6. Check for hours inquiry
+  // 6. Check for cancellation before generic scheduling/service matches
   if (intent === 'none') {
-    for (const pattern of HOURS_PATTERNS) {
+    for (const pattern of CANCELLATION_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
-        intent = 'horarios';
+        intent = 'cancelamento';
         confidence = 0.85;
-        priority = 'low';
-        detectedKeywords.push('horarios');
+        priority = 'medium';
+        detectedKeywords.push('cancelamento');
         break;
       }
     }
   }
 
-  // 7. Check for service inquiry
-  if (intent === 'none') {
-    for (const pattern of SERVICE_PATTERNS) {
-      if (pattern.test(normalizedMessage)) {
-        intent = 'servicos';
-        confidence = 0.85;
-        priority = 'low';
-        detectedKeywords.push('servicos');
-        break;
-      }
-    }
-  }
-
-  // 8. Check for price inquiry
+  // 7. Check for price inquiry before generic service matches like "consulta"
   if (intent === 'none') {
     for (const pattern of PRICE_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -469,7 +456,7 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 9. Check for scheduling
+  // 8. Check for scheduling before hours/service matches
   if (intent === 'none') {
     for (const pattern of SCHEDULING_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -482,14 +469,27 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 10. Check for cancellation
+  // 9. Check for hours inquiry
   if (intent === 'none') {
-    for (const pattern of CANCELLATION_PATTERNS) {
+    for (const pattern of HOURS_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
-        intent = 'cancelamento';
+        intent = 'horarios';
         confidence = 0.85;
-        priority = 'medium';
-        detectedKeywords.push('cancelamento');
+        priority = 'low';
+        detectedKeywords.push('horarios');
+        break;
+      }
+    }
+  }
+
+  // 10. Check for service inquiry
+  if (intent === 'none') {
+    for (const pattern of SERVICE_PATTERNS) {
+      if (pattern.test(normalizedMessage)) {
+        intent = 'servicos';
+        confidence = 0.85;
+        priority = 'low';
+        detectedKeywords.push('servicos');
         break;
       }
     }
@@ -565,6 +565,11 @@ export function getRecommendedAction(classification: IntentClassification): {
         responseTone: 'empathetic',
       };
     case 'saudacao':
+      return {
+        shouldRespond: true,
+        shouldUseKnowledge: false,
+        responseTone: 'neutral',
+      };
     case 'horarios':
     case 'servicos':
     case 'precos':

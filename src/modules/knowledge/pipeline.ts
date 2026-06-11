@@ -25,6 +25,11 @@ export async function createChunksForDocument(
   }
 
   const created = await knowledgeRepository.createChunks(chunks);
-  await knowledgeRetrievalService.addChunks(created);
+  try {
+    await knowledgeRetrievalService.addChunks(created);
+  } catch (error) {
+    console.warn('Failed to index chunks in vector store:', (error as Error).message);
+  }
+
   return created.length;
 }

@@ -144,7 +144,7 @@ class ChatwootClient {
    */
   async healthCheck(): Promise<boolean> {
     try {
-      await this.request<{ account: { id: number } }>('GET', '/me');
+      await this.request<Array<{ id: number }>>('GET', '/agents');
       return true;
     } catch {
       return false;

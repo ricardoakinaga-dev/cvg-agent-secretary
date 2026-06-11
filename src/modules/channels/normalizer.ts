@@ -2,35 +2,38 @@ import { randomUUID } from 'crypto';
 import { NormalizedChannelMessage } from './types';
 import type { ChannelType } from './types';
 import { ChatwootWebhookPayload } from '../../shared/types';
+import { getWebhookMessage, extractConversationMetadata } from '../chatwoot/normalizer';
 
 export function normalizeFromChatwoot(
   payload: ChatwootWebhookPayload
 ): NormalizedChannelMessage | null {
-  if (!payload.message || payload.message.message_type !== 'incoming') {
+  const message = getWebhookMessage(payload);
+  if (!message || message.message_type !== 'incoming') {
     return null;
   }
 
-  const message = payload.message;
   if (!message.content && (!message.attachments || message.attachments.length === 0)) {
     return null;
   }
 
+  const metadata = extractConversationMetadata(payload);
+
   return {
     messageId: randomUUID(),
     channel: 'chatwoot',
-    conversationId: payload.conversation.uuid,
-    contactId: payload.conversation.contact.id.toString(),
+    conversationId: metadata.conversationId,
+    contactId: metadata.contactId,
     chatwootConversationId: payload.conversation.id,
-    chatwootContactId: payload.conversation.contact.id,
+    chatwootContactId: metadata.chatwootContactId,
     content: message.content || '[Mensagem sem texto]',
     messageType: 'incoming',
     senderType: 'user',
-    senderName: message.sender.name,
-    senderIdentifier: `chatwoot:${payload.conversation.contact.id}`,
+    senderName: message.sender.name || metadata.contactName,
+    senderIdentifier: `chatwoot:${metadata.chatwootContactId}`,
     timestamp: new Date(),
     metadata: {
       inboxId: payload.conversation.inbox_id,
-      accountId: payload.conversation.account_id,
+      accountId: metadata.accountId,
       private: message.private,
     },
     attachments: (message.attachments || []).map(a => ({
