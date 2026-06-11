@@ -1,4 +1,5 @@
 import { ChatwootWebhookPayload } from '../../shared/types';
+export declare function looksLikeHumanOperatorMessage(content: string): boolean;
 /**
  * Process a Chatwoot webhook event
  */

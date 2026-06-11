@@ -117,7 +117,7 @@ export declare const MemorySchema: z.ZodObject<{
     key: string;
     contactId: string;
     category: "fact" | "preference" | "history" | "complaint" | "instruction" | "feedback";
-    source: "manual" | "imported" | "conversation" | "inferred";
+    source: "conversation" | "manual" | "imported" | "inferred";
     confidence: number;
     value?: unknown;
     conversationId?: string | undefined;
@@ -126,7 +126,7 @@ export declare const MemorySchema: z.ZodObject<{
     key: string;
     contactId: string;
     category: "fact" | "preference" | "history" | "complaint" | "instruction" | "feedback";
-    source: "manual" | "imported" | "conversation" | "inferred";
+    source: "conversation" | "manual" | "imported" | "inferred";
     confidence: number;
     value?: unknown;
     conversationId?: string | undefined;
@@ -141,13 +141,13 @@ export declare const UpdateMemorySchema: z.ZodObject<{
     lastConfirmedAt: z.ZodOptional<z.ZodDate>;
 }, "strip", z.ZodTypeAny, {
     value?: unknown;
-    source?: "manual" | "imported" | "conversation" | "inferred" | undefined;
+    source?: "conversation" | "manual" | "imported" | "inferred" | undefined;
     isActive?: boolean | undefined;
     confidence?: number | undefined;
     lastConfirmedAt?: Date | undefined;
 }, {
     value?: unknown;
-    source?: "manual" | "imported" | "conversation" | "inferred" | undefined;
+    source?: "conversation" | "manual" | "imported" | "inferred" | undefined;
     isActive?: boolean | undefined;
     confidence?: number | undefined;
     lastConfirmedAt?: Date | undefined;
@@ -330,7 +330,6 @@ export declare const ChatwootWebhookSchema: z.ZodObject<{
         content?: string | undefined;
     }>>;
 }, "strip", z.ZodTypeAny, {
-    event: "conversation_created" | "conversation_status_changed" | "conversation_updated" | "message_created" | "message_updated";
     conversation: {
         contact: {
             name: string;
@@ -344,13 +343,13 @@ export declare const ChatwootWebhookSchema: z.ZodObject<{
         account_id: number;
         inbox_id: number;
     };
+    event: "conversation_created" | "conversation_status_changed" | "conversation_updated" | "message_created" | "message_updated";
     message?: {
         id: number;
         message_type: number;
         content?: string | undefined;
     } | undefined;
 }, {
-    event: "conversation_created" | "conversation_status_changed" | "conversation_updated" | "message_created" | "message_updated";
     conversation: {
         contact: {
             name: string;
@@ -364,6 +363,7 @@ export declare const ChatwootWebhookSchema: z.ZodObject<{
         account_id: number;
         inbox_id: number;
     };
+    event: "conversation_created" | "conversation_status_changed" | "conversation_updated" | "message_created" | "message_updated";
     message?: {
         id: number;
         message_type: number;

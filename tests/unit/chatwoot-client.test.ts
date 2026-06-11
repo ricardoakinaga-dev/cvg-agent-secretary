@@ -80,6 +80,34 @@ describe('chatwootClient', () => {
     );
   });
 
+  it('removes selected labels by replacing the conversation label list', async () => {
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ payload: ['handoff', 'pending', 'urgent'] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({}),
+      });
+
+    await chatwootClient.removeLabels(42, ['handoff', 'pending']);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('/conversations/42/labels'),
+      expect.objectContaining({ method: 'GET' })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('/conversations/42/labels'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ labels: ['urgent'] }),
+      })
+    );
+  });
+
   it('assigns conversations to agents', async () => {
     fetchMock.mockResolvedValue({
       ok: true,
@@ -131,7 +159,7 @@ describe('chatwootClient', () => {
     await expect(chatwootClient.healthCheck()).resolves.toBe(true);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://app.chatwoot.com/api/v1/accounts/test-account-id/me',
+      'https://app.chatwoot.com/api/v1/accounts/test-account-id/agents',
       expect.objectContaining({ method: 'GET', body: undefined })
     );
   });

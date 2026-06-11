@@ -7,6 +7,11 @@ export interface SendMessageParams {
   private?: boolean;
 }
 
+interface LabelsResponse {
+  payload?: string[];
+  labels?: string[];
+}
+
 class ChatwootClient {
   private baseUrl: string;
   private apiToken: string;
@@ -94,6 +99,52 @@ class ChatwootClient {
       conversationId: String(conversationId),
       label,
     });
+  }
+
+  async listLabels(conversationId: number): Promise<string[]> {
+    const result = await this.request<LabelsResponse | string[]>(
+      'GET',
+      `/conversations/${conversationId}/labels`
+    );
+
+    if (Array.isArray(result)) {
+      return result;
+    }
+
+    if (Array.isArray(result.payload)) {
+      return result.payload;
+    }
+
+    return result.labels || [];
+  }
+
+  async updateLabels(conversationId: number, labels: string[]): Promise<void> {
+    await this.request(
+      'POST',
+      `/conversations/${conversationId}/labels`,
+      { labels: Array.from(new Set(labels)) }
+    );
+
+    logger.info('Conversation labels updated', {
+      conversationId: String(conversationId),
+      labels,
+    });
+  }
+
+  async removeLabels(conversationId: number, labelsToRemove: string[]): Promise<void> {
+    const labelsToRemoveSet = new Set(labelsToRemove);
+    const currentLabels = await this.listLabels(conversationId);
+    const nextLabels = currentLabels.filter((label) => !labelsToRemoveSet.has(label));
+
+    if (nextLabels.length === currentLabels.length) {
+      logger.info('No conversation labels to remove', {
+        conversationId: String(conversationId),
+        labelsToRemove,
+      });
+      return;
+    }
+
+    await this.updateLabels(conversationId, nextLabels);
   }
 
   /**

@@ -187,6 +187,67 @@ describe('OpenAI tool calling flow', () => {
     ]));
   });
 
+  it('returns fallback when availability tool cannot provide reliable slots', async () => {
+    mockChatCreate.mockResolvedValueOnce(toolResponse(
+      'check_available_slots',
+      {
+        from: '2026-06-01T00:00:00.000Z',
+        to: '2026-06-02T00:00:00.000Z',
+        limit: 2,
+      },
+      'call-check'
+    ));
+
+    mockExecuteAgentTool.mockResolvedValueOnce({
+      success: false,
+      slots: [],
+      message: 'relation "appointment_slots" does not exist',
+    });
+
+    const client = new OpenAIClient();
+    const result = await client.generateResponse(
+      'meu cachorro esta doente e preciso passar em consulta',
+      baseContext
+    );
+
+    expect(result).toEqual({
+      content: 'Peço desculpas, estou tendo dificuldades para processar sua solicitação neste momento. Um de nossos atendentes logo irá ajudá-lo.',
+      confidence: 0,
+      action: {
+        type: 'fallback',
+        reason: 'check_available_slots_needs_human',
+      },
+    });
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns fallback when availability tool finds no slots instead of letting the model infer no appointments', async () => {
+    mockChatCreate.mockResolvedValueOnce(toolResponse(
+      'check_available_slots',
+      {
+        from: '2026-06-01T00:00:00.000Z',
+        to: '2026-06-02T00:00:00.000Z',
+        limit: 2,
+      },
+      'call-check'
+    ));
+
+    mockExecuteAgentTool.mockResolvedValueOnce({
+      success: true,
+      slots: [],
+    });
+
+    const client = new OpenAIClient();
+    const result = await client.generateResponse('quero consulta hoje', baseContext);
+
+    expect(result.action).toEqual({
+      type: 'fallback',
+      reason: 'check_available_slots_needs_human',
+    });
+    expect(result.confidence).toBe(0);
+    expect(mockChatCreate).toHaveBeenCalledTimes(1);
+  });
+
   it('runs confirm_appointment before producing a confirmed appointment answer', async () => {
     mockChatCreate
       .mockResolvedValueOnce(toolResponse(

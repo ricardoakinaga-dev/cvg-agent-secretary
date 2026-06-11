@@ -4,6 +4,16 @@ const app_1 = require("./app");
 const config_1 = require("./config");
 const logging_1 = require("./modules/logging");
 const redis_1 = require("./shared/redis");
+const contextLoader_1 = require("./modules/conversations/contextLoader");
+let handoffCleanupInterval = null;
+function startHandoffCleanup() {
+    handoffCleanupInterval = setInterval(() => {
+        (0, contextLoader_1.sweepExpiredHandoffs)().catch((error) => {
+            logging_1.logger.error('Expired handoff cleanup failed', error);
+        });
+    }, 60_000);
+    handoffCleanupInterval.unref();
+}
 async function startServer() {
     try {
         logging_1.logger.info('Starting CVG Secretary Agent', {
@@ -12,6 +22,7 @@ async function startServer() {
         });
         // Connect to Redis
         await redis_1.redisClient.connect();
+        startHandoffCleanup();
         // Start Express server
         app_1.app.listen(config_1.config.port, () => {
             logging_1.logger.info(`Server listening on port ${config_1.config.port}`);
@@ -28,6 +39,9 @@ async function startServer() {
 process.on('SIGTERM', async () => {
     logging_1.logger.info('SIGTERM received, shutting down gracefully');
     try {
+        if (handoffCleanupInterval) {
+            clearInterval(handoffCleanupInterval);
+        }
         await redis_1.redisClient.disconnect();
         logging_1.logger.info('Redis disconnected');
     }
@@ -39,6 +53,9 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
     logging_1.logger.info('SIGINT received, shutting down gracefully');
     try {
+        if (handoffCleanupInterval) {
+            clearInterval(handoffCleanupInterval);
+        }
         await redis_1.redisClient.disconnect();
         logging_1.logger.info('Redis disconnected');
     }

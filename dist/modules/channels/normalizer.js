@@ -6,30 +6,32 @@ exports.normalizeFromWhatsapp = normalizeFromWhatsapp;
 exports.detectChannelType = detectChannelType;
 exports.isValidChannelMessage = isValidChannelMessage;
 const crypto_1 = require("crypto");
+const normalizer_1 = require("../chatwoot/normalizer");
 function normalizeFromChatwoot(payload) {
-    if (!payload.message || payload.message.message_type !== 'incoming') {
+    const message = (0, normalizer_1.getWebhookMessage)(payload);
+    if (!message || message.message_type !== 'incoming') {
         return null;
     }
-    const message = payload.message;
     if (!message.content && (!message.attachments || message.attachments.length === 0)) {
         return null;
     }
+    const metadata = (0, normalizer_1.extractConversationMetadata)(payload);
     return {
         messageId: (0, crypto_1.randomUUID)(),
         channel: 'chatwoot',
-        conversationId: payload.conversation.uuid,
-        contactId: payload.conversation.contact.id.toString(),
+        conversationId: metadata.conversationId,
+        contactId: metadata.contactId,
         chatwootConversationId: payload.conversation.id,
-        chatwootContactId: payload.conversation.contact.id,
+        chatwootContactId: metadata.chatwootContactId,
         content: message.content || '[Mensagem sem texto]',
         messageType: 'incoming',
         senderType: 'user',
-        senderName: message.sender.name,
-        senderIdentifier: `chatwoot:${payload.conversation.contact.id}`,
+        senderName: message.sender.name || metadata.contactName,
+        senderIdentifier: `chatwoot:${metadata.chatwootContactId}`,
         timestamp: new Date(),
         metadata: {
             inboxId: payload.conversation.inbox_id,
-            accountId: payload.conversation.account_id,
+            accountId: metadata.accountId,
             private: message.private,
         },
         attachments: (message.attachments || []).map(a => ({

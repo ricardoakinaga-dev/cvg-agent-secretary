@@ -7,6 +7,12 @@ const mockRedis = vi.hoisted(() => ({
   ping: vi.fn(async () => true),
   checkMessageHash: vi.fn(),
   setMessageHash: vi.fn(),
+  setMessageHashIfAbsent: vi.fn(),
+  setContentHashIfAbsent: vi.fn(),
+  markBotOutgoingContent: vi.fn(),
+  markBotOutgoingMessageId: vi.fn(),
+  isBotOutgoingMessageId: vi.fn(),
+  consumeBotOutgoingContent: vi.fn(),
 }));
 
 const mockAiRouter = vi.hoisted(() => ({
@@ -42,6 +48,8 @@ const mockContextLoader = vi.hoisted(() => ({
   formatConversationHistory: vi.fn(() => []),
   shouldProcessConversation: vi.fn(() => true),
   loadContactAndMemories: vi.fn(),
+  updateConversationState: vi.fn(),
+  resetExpiredHandoff: vi.fn(),
 }));
 
 const mockSchedulingState = vi.hoisted(() => ({
@@ -85,10 +93,25 @@ vi.mock('../../src/modules/chatwoot/integration', () => ({
 vi.mock('../../src/modules/security/guardrails', () => ({
   checkGuardrails: vi.fn(() => ({ allowed: true })),
   checkResponseGuardrails: vi.fn(() => ({ allowed: true })),
+  checkCommercialResponseGuardrails: vi.fn(() => ({ allowed: true })),
   generateFallbackResponse: vi.fn(() => 'Vou chamar um atendente.'),
+  sanitizeForPrompt: vi.fn((text: string) => text),
 }));
 vi.mock('../../src/modules/intent/classifier', () => ({
-  classifyIntent: vi.fn(() => ({ intent: 'agendamento', entities: { petName: 'Buddy' } })),
+  classifyIntent: vi.fn(() => ({
+    intent: 'agendamento',
+    confidence: 0.8,
+    priority: 'medium',
+    detectedKeywords: ['agendamento'],
+    entities: { petName: 'Buddy' },
+    requiresHandoff: false,
+    riskLevel: 'low',
+  })),
+  getRecommendedAction: vi.fn(() => ({
+    shouldRespond: true,
+    shouldUseKnowledge: true,
+    responseTone: 'informative',
+  })),
 }));
 vi.mock('../../src/modules/scheduling/state', () => mockSchedulingState);
 vi.mock('../../src/modules/conversations/contextLoader', () => mockContextLoader);
@@ -177,8 +200,16 @@ describe('signed Chatwoot webhook to agent response flow', () => {
     vi.clearAllMocks();
     mockRedis.checkMessageHash.mockResolvedValue(false);
     mockRedis.setMessageHash.mockResolvedValue(undefined);
+    mockRedis.setMessageHashIfAbsent.mockResolvedValue(true);
+    mockRedis.setContentHashIfAbsent.mockResolvedValue(true);
+    mockRedis.markBotOutgoingContent.mockResolvedValue(undefined);
+    mockRedis.markBotOutgoingMessageId.mockResolvedValue(undefined);
+    mockRedis.isBotOutgoingMessageId.mockResolvedValue(false);
+    mockRedis.consumeBotOutgoingContent.mockResolvedValue(false);
     mockContextLoader.loadConversationContext.mockResolvedValue(createConversationContext());
     mockContextLoader.addMessageToContext.mockImplementation(async (context) => context);
+    mockContextLoader.updateConversationState.mockResolvedValue(undefined);
+    mockContextLoader.resetExpiredHandoff.mockResolvedValue(undefined);
     mockContextLoader.loadContactAndMemories.mockResolvedValue({
       contactId: 'contact-99',
       contact: null,
@@ -228,7 +259,7 @@ describe('signed Chatwoot webhook to agent response flow', () => {
       await expect(response.json()).resolves.toEqual({ success: true });
     });
 
-    expect(mockRedis.checkMessageHash).toHaveBeenCalledOnce();
+    expect(mockRedis.setMessageHashIfAbsent).toHaveBeenCalledOnce();
     expect(mockKnowledgeRetrieval.search).toHaveBeenCalledWith({
       query: 'quero agendar consulta para o Buddy',
       limit: 3,

@@ -23,16 +23,28 @@ export interface ChatwootWebhookPayload {
     id: number;
     conversation: ChatwootConversation;
     message?: ChatwootMessage;
+    content?: string;
+    message_type?: ChatwootMessageType;
+    sender?: ChatwootSender;
+    attachments?: ChatwootAttachment[];
+    private?: boolean;
+    account?: {
+        id: number;
+        name?: string;
+    };
 }
 export type ChatwootEventType = 'conversation_created' | 'conversation_status_changed' | 'conversation_updated' | 'message_created' | 'message_updated';
 export interface ChatwootConversation {
     id: number;
-    uuid: string;
-    account_id: number;
+    uuid?: string;
+    account_id?: number;
     inbox_id: number;
     status: 'open' | 'pending' | 'resolved' | 'closed';
     assignee_id: number | null;
-    contact: ChatwootContact;
+    contact?: ChatwootContact;
+    meta?: {
+        sender?: ChatwootContact;
+    };
 }
 export interface ChatwootContact {
     id: number;
@@ -44,15 +56,16 @@ export interface ChatwootContact {
 export interface ChatwootMessage {
     id: number;
     content: string;
-    message_type: 'incoming' | 'outgoing';
+    message_type: ChatwootMessageType;
     sender: ChatwootSender;
-    attachments: ChatwootAttachment[];
+    attachments?: ChatwootAttachment[];
     private: boolean;
 }
+export type ChatwootMessageType = 'incoming' | 'outgoing' | 0 | 1;
 export interface ChatwootSender {
     id: number;
     name: string;
-    type: 'contact' | 'agent' | 'bot';
+    type: 'contact' | 'agent' | 'bot' | 'user';
 }
 export interface ChatwootAttachment {
     id: number;
@@ -77,6 +90,9 @@ export interface ConversationMetadata {
     lastMessageAt: Date;
     inboxId: number;
     accountId: number;
+    handoffStartedAt?: string;
+    handoffUntil?: string;
+    handoffReason?: string;
 }
 export type ConversationState = 'new' | 'in_progress' | 'waiting' | 'handoff' | 'completed' | 'failed';
 export interface AgentRequest {

@@ -34,6 +34,13 @@ const URGENCY_INDICATORS: UrgencyIndicator[] = [
     riskLevel: 'high',
   },
   {
+    pattern: /(?:pet|cachorro|gato|animal).{0,30}(?:foi\s+)?atropelad[oa]|atropelaram\s+(?:meu|minha|o|a)\s+(?:pet|cachorro|gato|animal)/i,
+    priority: 'critical',
+    requiresHandoff: true,
+    handoffReason: 'Emergência clínica - atropelamento',
+    riskLevel: 'high',
+  },
+  {
     pattern: /(?:meu|me|a) (?:pet|cachorro|gato|animal)\s+(?:teve|está\s+tendo)\s+convulsão/i,
     priority: 'critical',
     requiresHandoff: true,
@@ -48,10 +55,24 @@ const URGENCY_INDICATORS: UrgencyIndicator[] = [
     riskLevel: 'high',
   },
   {
+    pattern: /(?:não|nao)\s+(?:est[áa]\s+)?respirando\s+(?:direito|bem)|respira[cç][aã]o\s+(?:ruim|fraca|dif[ií]cil)/i,
+    priority: 'critical',
+    requiresHandoff: true,
+    handoffReason: 'Emergência clínica - dificuldade respiratória',
+    riskLevel: 'high',
+  },
+  {
     pattern: /(?:meu|me|a) (?:pet|cachorro|gato|animal)\s+(?:não\s+)?(?:consegue|mover|levantar)\s+andar/i,
     priority: 'critical',
     requiresHandoff: true,
     handoffReason: 'Emergência clínica - não consegue andar',
+    riskLevel: 'high',
+  },
+  {
+    pattern: /(?:pet|cachorro|gato|animal|gato|cachorro).{0,40}(?:morrendo|morrer|morreu|desfalec(?:eu|ido)|muito\s+fraco|fraqueza\s+extrema)|(?:morrendo|morrer|morreu|desfalec(?:eu|ido)|muito\s+fraco|fraqueza\s+extrema).{0,40}(?:pet|cachorro|gato|animal)/i,
+    priority: 'critical',
+    requiresHandoff: true,
+    handoffReason: 'Emergência clínica - paciente muito fraco ou em risco de vida',
     riskLevel: 'high',
   },
   {
@@ -196,8 +217,16 @@ const PRICE_PATTERNS: RegExp[] = [
  */
 const SCHEDULING_PATTERNS: RegExp[] = [
   /agend|marcar|reservar|horário\s+(?:disponív|para)/i,
+  /(?:hoje|amanh[ãa]|segunda|terça|terca|quarta|quinta|sexta|s[áa]bado|sabado|domingo).{0,40}(?:\d{1,2}h|\d{1,2}:\d{2}|manh[ãa]|tarde|noite)/i,
   /(?:quinta|sexta|sábado|domingo|segunda|terça|quarta)\s+\d{1,2}/i,
   /(?:manhã|tarde|noite)\s+(?:de\s+)?(?:hoje|amanhã)/i,
+];
+
+const SCHEDULING_FOLLOW_UP_PATTERNS: RegExp[] = [
+  /(?:hoje|amanh[ãa]|segunda|terça|terca|quarta|quinta|sexta|s[áa]bado|sabado|domingo)/i,
+  /\b\d{1,2}(?::\d{2})?\s*h?\b/i,
+  /(?:manh[ãa]|tarde|noite)/i,
+  /(?:prefiro|quero|pode\s+ser|por\s+volta)/i,
 ];
 
 /**
@@ -315,6 +344,24 @@ function detectFinancialSensitivity(message: string): boolean {
  */
 function detectHumanRequest(message: string): boolean {
   return HUMAN_REQUEST_PATTERNS.some(pattern => pattern.test(message));
+}
+
+function hasSchedulingContext(context?: ClassificationContext): boolean {
+  if (context?.previousIntent === 'agendamento') {
+    return true;
+  }
+
+  return Boolean(context?.conversationHistory?.some((item) =>
+    /agend|marcar|consulta|hor[aá]rio|data/i.test(item)
+  ));
+}
+
+function looksLikeSchedulingFollowUp(message: string, context?: ClassificationContext): boolean {
+  if (!hasSchedulingContext(context)) {
+    return false;
+  }
+
+  return SCHEDULING_FOLLOW_UP_PATTERNS.some(pattern => pattern.test(message));
 }
 
 /**
@@ -443,7 +490,15 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 7. Check for price inquiry before generic service matches like "consulta"
+  // 7. Keep date/time follow-ups inside the scheduling flow.
+  if (intent === 'none' && looksLikeSchedulingFollowUp(normalizedMessage, context)) {
+    intent = 'agendamento';
+    confidence = 0.82;
+    priority = 'medium';
+    detectedKeywords.push('agendamento');
+  }
+
+  // 8. Check for price inquiry before generic service matches like "consulta"
   if (intent === 'none') {
     for (const pattern of PRICE_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -456,7 +511,7 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 8. Check for scheduling before hours/service matches
+  // 9. Check for scheduling before hours/service matches
   if (intent === 'none') {
     for (const pattern of SCHEDULING_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -469,7 +524,7 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 9. Check for hours inquiry
+  // 10. Check for hours inquiry
   if (intent === 'none') {
     for (const pattern of HOURS_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -482,7 +537,7 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 10. Check for service inquiry
+  // 11. Check for service inquiry
   if (intent === 'none') {
     for (const pattern of SERVICE_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -495,7 +550,7 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 11. Check for clinical questions
+  // 12. Check for clinical questions
   if (intent === 'none') {
     for (const pattern of CLINICAL_PATTERNS) {
       if (pattern.test(normalizedMessage)) {
@@ -510,7 +565,7 @@ export function classifyIntent(message: string, context?: ClassificationContext)
     }
   }
 
-  // 12. If no intent detected, set as unknown
+  // 13. If no intent detected, set as unknown
   if (intent === 'none') {
     intent = '不明';
     confidence = 0.3; // Low confidence for unknown

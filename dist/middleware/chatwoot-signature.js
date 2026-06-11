@@ -26,8 +26,9 @@ function safeCompareHex(expected, actual) {
         return false;
     }
 }
-function computeChatwootSignature(rawBody, secret) {
-    return (0, crypto_1.createHmac)('sha256', secret).update(rawBody).digest('hex');
+function computeChatwootSignature(rawBody, secret, timestamp) {
+    const payload = timestamp ? `${timestamp}.${rawBody.toString('utf8')}` : rawBody;
+    return (0, crypto_1.createHmac)('sha256', secret).update(payload).digest('hex');
 }
 function verifyChatwootSignature(req, res, next) {
     const secret = config_1.config.chatwoot.webhookSecret;
@@ -45,7 +46,8 @@ function verifyChatwootSignature(req, res, next) {
         res.status(401).json({ success: false, error: 'Invalid webhook signature' });
         return;
     }
-    const expected = computeChatwootSignature(rawBody, secret);
+    const timestamp = req.header('x-chatwoot-timestamp');
+    const expected = computeChatwootSignature(rawBody, secret, timestamp);
     const actual = normalizeSignature(signature);
     if (!safeCompareHex(expected, actual)) {
         logging_1.logger.warn('Chatwoot webhook signature invalid');

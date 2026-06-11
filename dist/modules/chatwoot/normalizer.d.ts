@@ -1,4 +1,8 @@
-import { ChatwootWebhookPayload, NormalizedMessage } from '../../shared/types';
+import { ChatwootWebhookPayload, ChatwootMessage, NormalizedMessage, ChatwootMessageType } from '../../shared/types';
+export declare function normalizeChatwootMessageType(messageType: ChatwootMessageType | undefined): 'incoming' | 'outgoing' | null;
+export declare function isContactMessage(message: ChatwootMessage): boolean;
+export declare function isOutgoingMessage(message: ChatwootMessage | null): message is ChatwootMessage;
+export declare function getWebhookMessage(payload: ChatwootWebhookPayload): ChatwootMessage | null;
 /**
  * Normalizes a Chatwoot webhook payload into internal format
  */

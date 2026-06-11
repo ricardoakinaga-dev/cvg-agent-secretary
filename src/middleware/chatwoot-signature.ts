@@ -39,8 +39,13 @@ function safeCompareHex(expected: string, actual: string): boolean {
   }
 }
 
-export function computeChatwootSignature(rawBody: Buffer, secret: string): string {
-  return createHmac('sha256', secret).update(rawBody).digest('hex');
+export function computeChatwootSignature(
+  rawBody: Buffer,
+  secret: string,
+  timestamp?: string
+): string {
+  const payload = timestamp ? `${timestamp}.${rawBody.toString('utf8')}` : rawBody;
+  return createHmac('sha256', secret).update(payload).digest('hex');
 }
 
 export function verifyChatwootSignature(req: Request, res: Response, next: NextFunction): void {
@@ -63,7 +68,8 @@ export function verifyChatwootSignature(req: Request, res: Response, next: NextF
     return;
   }
 
-  const expected = computeChatwootSignature(rawBody, secret);
+  const timestamp = req.header('x-chatwoot-timestamp');
+  const expected = computeChatwootSignature(rawBody, secret, timestamp);
   const actual = normalizeSignature(signature);
 
   if (!safeCompareHex(expected, actual)) {

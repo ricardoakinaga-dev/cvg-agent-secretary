@@ -70,8 +70,36 @@ class RedisClient {
         const key = `message:hash:${hash}`;
         await this.getClient().setex(key, ttlSeconds, '1');
     }
+    async setMessageHashIfAbsent(hash, ttlSeconds = 3600) {
+        const key = `message:hash:${hash}`;
+        const result = await this.getClient().set(key, '1', 'EX', ttlSeconds, 'NX');
+        return result === 'OK';
+    }
+    async setContentHashIfAbsent(hash, ttlSeconds = 300) {
+        const key = `message:content-hash:${hash}`;
+        const result = await this.getClient().set(key, '1', 'EX', ttlSeconds, 'NX');
+        return result === 'OK';
+    }
     async checkMessageHash(hash) {
         const key = `message:hash:${hash}`;
+        const result = await this.getClient().exists(key);
+        return result === 1;
+    }
+    async markBotOutgoingContent(chatwootConversationId, content, ttlSeconds = 300) {
+        const key = `bot:outgoing:content:${chatwootConversationId}:${this.hashText(content)}`;
+        await this.getClient().setex(key, ttlSeconds, '1');
+    }
+    async consumeBotOutgoingContent(chatwootConversationId, content) {
+        const key = `bot:outgoing:content:${chatwootConversationId}:${this.hashText(content)}`;
+        const result = await this.getClient().del(key);
+        return result > 0;
+    }
+    async markBotOutgoingMessageId(messageId, ttlSeconds = 3600) {
+        const key = `bot:outgoing:message:${messageId}`;
+        await this.getClient().setex(key, ttlSeconds, '1');
+    }
+    async isBotOutgoingMessageId(messageId) {
+        const key = `bot:outgoing:message:${messageId}`;
         const result = await this.getClient().exists(key);
         return result === 1;
     }
@@ -83,6 +111,39 @@ class RedisClient {
             return JSON.parse(data);
         }
         return null;
+    }
+    async listConversationStates() {
+        const client = this.getClient();
+        const states = [];
+        let cursor = '0';
+        do {
+            const [nextCursor, keys] = await client.scan(cursor, 'MATCH', 'conversation:*:state', 'COUNT', 100);
+            cursor = nextCursor;
+            if (keys.length === 0) {
+                continue;
+            }
+            const values = await client.mget(...keys);
+            keys.forEach((key, index) => {
+                const data = values[index];
+                if (!data) {
+                    return;
+                }
+                const match = key.match(/^conversation:(.*):state$/);
+                if (!match) {
+                    return;
+                }
+                try {
+                    states.push({
+                        conversationId: match[1],
+                        state: JSON.parse(data),
+                    });
+                }
+                catch (error) {
+                    logging_1.logger.warn('Failed to parse conversation state from Redis', { key, error });
+                }
+            });
+        } while (cursor !== '0');
+        return states;
     }
     async setConversationState(conversationId, state, ttlSeconds = 86400) {
         const key = `conversation:${conversationId}:state`;

@@ -7,8 +7,18 @@ declare class RedisClient {
     isReady(): boolean;
     disconnect(): Promise<void>;
     setMessageHash(hash: string, ttlSeconds?: number): Promise<void>;
+    setMessageHashIfAbsent(hash: string, ttlSeconds?: number): Promise<boolean>;
+    setContentHashIfAbsent(hash: string, ttlSeconds?: number): Promise<boolean>;
     checkMessageHash(hash: string): Promise<boolean>;
+    markBotOutgoingContent(chatwootConversationId: number, content: string, ttlSeconds?: number): Promise<void>;
+    consumeBotOutgoingContent(chatwootConversationId: number, content: string): Promise<boolean>;
+    markBotOutgoingMessageId(messageId: number, ttlSeconds?: number): Promise<void>;
+    isBotOutgoingMessageId(messageId: number): Promise<boolean>;
     getConversationState(conversationId: string): Promise<Record<string, unknown> | null>;
+    listConversationStates(): Promise<Array<{
+        conversationId: string;
+        state: Record<string, unknown>;
+    }>>;
     setConversationState(conversationId: string, state: Record<string, unknown>, ttlSeconds?: number): Promise<void>;
     appendMessageToConversation(conversationId: string, message: Record<string, unknown>, maxMessages?: number): Promise<void>;
     getConversationMessages(conversationId: string): Promise<Record<string, unknown>[]>;

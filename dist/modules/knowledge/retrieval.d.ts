@@ -9,6 +9,7 @@ declare class KnowledgeRetrievalService {
     private isInitialized;
     private useVectorStore;
     constructor();
+    private generateValidEmbedding;
     /**
      * Initialize the retrieval service
      * Checks if vector store is available and configures accordingly

@@ -43,7 +43,7 @@ exports.apiLimiter = (0, express_rate_limit_1.default)({
     legacyHeaders: false,
     message: { success: false, error: 'Too many requests, please try again later' },
     keyGenerator: (req) => {
-        return req.headers['x-correlation-id'] || (0, express_rate_limit_1.ipKeyGenerator)(req.ip || 'unknown');
+        return req.ip ? (0, express_rate_limit_1.ipKeyGenerator)(req.ip, 56) : 'unknown';
     },
     handler: (req, res) => {
         logging_1.logger.warn('Rate limit exceeded', {
@@ -64,7 +64,7 @@ exports.webhookLimiter = (0, express_rate_limit_1.default)({
     legacyHeaders: false,
     message: { success: false, error: 'Webhook rate limit exceeded' },
     keyGenerator: (req) => {
-        return req.headers['x-chatwoot-account-id'] || (0, express_rate_limit_1.ipKeyGenerator)(req.ip || 'unknown');
+        return req.headers['x-chatwoot-account-id'] || (req.ip ? (0, express_rate_limit_1.ipKeyGenerator)(req.ip, 56) : 'unknown');
     },
     handler: (req, res) => {
         logging_1.logger.warn('Webhook rate limit exceeded', {

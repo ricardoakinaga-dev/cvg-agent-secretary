@@ -66,6 +66,36 @@ class ChatwootClient {
             label,
         });
     }
+    async listLabels(conversationId) {
+        const result = await this.request('GET', `/conversations/${conversationId}/labels`);
+        if (Array.isArray(result)) {
+            return result;
+        }
+        if (Array.isArray(result.payload)) {
+            return result.payload;
+        }
+        return result.labels || [];
+    }
+    async updateLabels(conversationId, labels) {
+        await this.request('POST', `/conversations/${conversationId}/labels`, { labels: Array.from(new Set(labels)) });
+        logging_1.logger.info('Conversation labels updated', {
+            conversationId: String(conversationId),
+            labels,
+        });
+    }
+    async removeLabels(conversationId, labelsToRemove) {
+        const labelsToRemoveSet = new Set(labelsToRemove);
+        const currentLabels = await this.listLabels(conversationId);
+        const nextLabels = currentLabels.filter((label) => !labelsToRemoveSet.has(label));
+        if (nextLabels.length === currentLabels.length) {
+            logging_1.logger.info('No conversation labels to remove', {
+                conversationId: String(conversationId),
+                labelsToRemove,
+            });
+            return;
+        }
+        await this.updateLabels(conversationId, nextLabels);
+    }
     /**
      * Assign a conversation to an agent
      */
@@ -99,7 +129,7 @@ class ChatwootClient {
      */
     async healthCheck() {
         try {
-            await this.request('GET', '/me');
+            await this.request('GET', '/agents');
             return true;
         }
         catch {

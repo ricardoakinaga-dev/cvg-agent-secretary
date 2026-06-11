@@ -35,10 +35,17 @@ export declare function formatConversationHistory(messages: NormalizedMessage[])
  * Check if conversation is in a state that should be processed
  */
 export declare function shouldProcessConversation(context: ConversationContext): boolean;
+export declare function isHandoffExpired(context: ConversationContext, now?: Date): boolean;
+export declare function resetExpiredHandoff(context: ConversationContext, now?: Date): Promise<boolean>;
+export declare function sweepExpiredHandoffs(now?: Date): Promise<number>;
 /**
  * Update conversation state
  */
-export declare function updateConversationState(context: ConversationContext, newState: ConversationState): Promise<void>;
+export declare function updateConversationState(context: ConversationContext, newState: ConversationState, options?: {
+    reason?: string;
+    now?: Date;
+    handoffTimeoutMinutes?: number;
+}): Promise<void>;
 /**
  * Load contact and memory for context (Phase 2)
  */

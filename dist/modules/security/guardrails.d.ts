@@ -1,7 +1,8 @@
+import { KnowledgeChunk } from '../../shared/types';
 /**
  * Types of fallback responses
  */
-export type FallbackType = 'no_knowledge' | 'low_confidence' | 'clarification' | 'handoff_needed';
+export type FallbackType = 'no_knowledge' | 'low_confidence' | 'clarification' | 'handoff_needed' | 'security_block';
 /**
  * Guardrail result
  */
@@ -12,6 +13,7 @@ export interface GuardrailResult {
     modifiedContent?: string;
     action?: 'respond' | 'handoff' | 'block' | 'fallback';
 }
+export declare function sanitizeForPrompt(text: string): string;
 /**
  * Generate fallback response based on type
  */
@@ -24,6 +26,10 @@ export declare function checkGuardrails(message: string): GuardrailResult;
  * Check if response contains prohibited content
  */
 export declare function checkResponseGuardrails(response: string): GuardrailResult;
+/**
+ * Prevent commercial answers from inventing prices outside the retrieved evidence.
+ */
+export declare function checkCommercialResponseGuardrails(message: string, response: string, knowledge: KnowledgeChunk[]): GuardrailResult;
 /**
  * Determine fallback type based on context
  */

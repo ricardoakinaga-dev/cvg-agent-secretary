@@ -122,7 +122,7 @@ export function sanitizeForPrompt(text: string): string {
 export function generateFallbackResponse(type: FallbackType): string {
   switch (type) {
     case 'no_knowledge':
-      return 'Não tenho essa informação específica no momento. Posso verificar com um de nossos atendentes para te ajudar melhor.';
+      return 'Desculpe, não tenho essa resposta então vou te transferir para um atendente humano.';
     case 'low_confidence':
       return 'Não tenho total certeza sobre isso. Para garantir a informação correta, vou verificar com um atendente. Pode aguardar um momento?';
     case 'clarification':

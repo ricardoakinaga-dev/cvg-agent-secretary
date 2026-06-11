@@ -16,6 +16,20 @@ export interface AppConfig {
         url: string;
         password?: string;
     };
+    knowledge: {
+        vectorStore: 'postgres' | 'qdrant';
+    };
+    qdrant: {
+        url: string;
+        apiKey: string;
+        collection: string;
+        vectorName: string;
+        sparseVectorName: string;
+        prefetchLimit: number;
+        scoreThreshold: number;
+        createCollection: boolean;
+        readOnly: boolean;
+    };
     openai: {
         apiKey: string;
         model: string;
@@ -36,10 +50,8 @@ export interface AppConfig {
     auth: {
         apiToken: string;
     };
-    qdrant: {
-        url: string;
-        apiKey: string;
-        collection: string;
+    conversation: {
+        handoffTimeoutMinutes: number;
     };
     logging: {
         level: string;

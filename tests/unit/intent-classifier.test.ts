@@ -20,6 +20,22 @@ describe('Intent Classifier', () => {
       expect(result.handoffReason).toContain('envenenamento');
     });
 
+    it('should detect emergency - hit by car', () => {
+      const result = classifyIntent('meu cachorro foi atropelado');
+
+      expect(result.intent).toBe('possivel_urgencia');
+      expect(result.requiresHandoff).toBe(true);
+      expect(result.riskLevel).toBe('high');
+    });
+
+    it('should detect emergency - very weak or dying', () => {
+      const result = classifyIntent('meu gato está muito fraco parece que está morrendo');
+
+      expect(result.intent).toBe('possivel_urgencia');
+      expect(result.requiresHandoff).toBe(true);
+      expect(result.riskLevel).toBe('high');
+    });
+
     it('should detect emergency - cannot walk', () => {
       const result = classifyIntent('meu pet não consegue andar');
       
@@ -79,6 +95,16 @@ describe('Intent Classifier', () => {
       const result = classifyIntent('queria marcar uma consulta');
       
       expect(result.intent).toMatch(/(?:agendamento|servicos)/);
+    });
+
+    it('should keep scheduling context for date and time preference follow-up', () => {
+      const result = classifyIntent('Eu quero para quinta feira, por volta das 15h', {
+        previousIntent: 'agendamento',
+        conversationHistory: ['Tutor: Quero agendar', 'Agente: Qual melhor dia e horario?'],
+      });
+
+      expect(result.intent).toBe('agendamento');
+      expect(result.confidence).toBeGreaterThan(0.7);
     });
 
     it('should detect cancellation', () => {

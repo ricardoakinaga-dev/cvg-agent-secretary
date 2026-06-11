@@ -20,7 +20,12 @@ async function createChunksForDocument(document, generateEmbeddings = true) {
         }
     }
     const created = await repository_1.knowledgeRepository.createChunks(chunks);
-    await retrieval_1.knowledgeRetrievalService.addChunks(created);
+    try {
+        await retrieval_1.knowledgeRetrievalService.addChunks(created);
+    }
+    catch (error) {
+        console.warn('Failed to index chunks in vector store:', error.message);
+    }
     return created.length;
 }
 //# sourceMappingURL=pipeline.js.map

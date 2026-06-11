@@ -12,6 +12,9 @@ import { Contact } from '../contacts/types';
 import { petRepository } from '../pets/repository';
 import { Pet } from '../pets/types';
 import { memoryRepository } from '../memory/repository';
+import { chatwootClient } from '../chatwoot/client';
+
+const TEMPORARY_HANDOFF_LABELS = ['handoff', 'pending'];
 
 /**
  * Extended context that includes memory information (for LLM context)
@@ -89,6 +92,11 @@ export async function loadConversationContext(
  */
 export async function saveConversationContext(context: ConversationContext): Promise<void> {
   await redisClient.setConversationState(context.conversationId, {
+    conversationId: context.conversationId,
+    chatwootConversationId: context.chatwootConversationId,
+    contactId: context.contactId,
+    chatwootContactId: context.chatwootContactId,
+    contactName: context.contactName,
     messages: context.messages,
     metadata: context.metadata,
     state: context.state,
@@ -187,7 +195,55 @@ export async function resetExpiredHandoff(
   delete context.metadata.handoffUntil;
   delete context.metadata.handoffReason;
   await saveConversationContext(context);
+
+  try {
+    await chatwootClient.removeLabels(context.chatwootConversationId, TEMPORARY_HANDOFF_LABELS);
+  } catch (error) {
+    logger.warn('Failed to remove expired handoff labels from Chatwoot', {
+      conversationId: context.conversationId,
+      chatwootConversationId: context.chatwootConversationId,
+      error,
+    });
+  }
+
   return true;
+}
+
+export async function sweepExpiredHandoffs(now: Date = new Date()): Promise<number> {
+  const states = await redisClient.listConversationStates();
+  let cleaned = 0;
+
+  for (const entry of states) {
+    const state = entry.state.state;
+    const chatwootConversationId = entry.state.chatwootConversationId;
+
+    if (state !== 'handoff' || typeof chatwootConversationId !== 'number') {
+      continue;
+    }
+
+    const context: ConversationContext = {
+      conversationId: typeof entry.state.conversationId === 'string'
+        ? entry.state.conversationId
+        : entry.conversationId,
+      chatwootConversationId,
+      contactId: typeof entry.state.contactId === 'string' ? entry.state.contactId : 'unknown',
+      chatwootContactId: typeof entry.state.chatwootContactId === 'number' ? entry.state.chatwootContactId : 0,
+      contactName: typeof entry.state.contactName === 'string' ? entry.state.contactName : 'Cliente',
+      messages: Array.isArray(entry.state.messages) ? entry.state.messages as NormalizedMessage[] : [],
+      metadata: entry.state.metadata as ConversationMetadata,
+      state: 'handoff',
+    };
+
+    if (await resetExpiredHandoff(context, now)) {
+      cleaned += 1;
+    }
+  }
+
+  if (cleaned > 0) {
+    logger.info('Expired handoff sweep completed', { cleaned });
+  }
+
+  return cleaned;
 }
 
 /**

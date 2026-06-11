@@ -19,6 +19,9 @@ declare class ChatwootClient {
      * Add a label to a conversation
      */
     addLabel(conversationId: number, label: string): Promise<void>;
+    listLabels(conversationId: number): Promise<string[]>;
+    updateLabels(conversationId: number, labels: string[]): Promise<void>;
+    removeLabels(conversationId: number, labelsToRemove: string[]): Promise<void>;
     /**
      * Assign a conversation to an agent
      */

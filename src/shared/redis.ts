@@ -134,6 +134,45 @@ class RedisClient {
     return null;
   }
 
+  async listConversationStates(): Promise<Array<{ conversationId: string; state: Record<string, unknown> }>> {
+    const client = this.getClient();
+    const states: Array<{ conversationId: string; state: Record<string, unknown> }> = [];
+    let cursor = '0';
+
+    do {
+      const [nextCursor, keys] = await client.scan(cursor, 'MATCH', 'conversation:*:state', 'COUNT', 100);
+      cursor = nextCursor;
+
+      if (keys.length === 0) {
+        continue;
+      }
+
+      const values = await client.mget(...keys);
+      keys.forEach((key, index) => {
+        const data = values[index];
+        if (!data) {
+          return;
+        }
+
+        const match = key.match(/^conversation:(.*):state$/);
+        if (!match) {
+          return;
+        }
+
+        try {
+          states.push({
+            conversationId: match[1],
+            state: JSON.parse(data) as Record<string, unknown>,
+          });
+        } catch (error) {
+          logger.warn('Failed to parse conversation state from Redis', { key, error });
+        }
+      });
+    } while (cursor !== '0');
+
+    return states;
+  }
+
   async setConversationState(
     conversationId: string,
     state: Record<string, unknown>,

@@ -2,6 +2,19 @@ import { app } from './app';
 import { config } from './config';
 import { logger } from './modules/logging';
 import { redisClient } from './shared/redis';
+import { sweepExpiredHandoffs } from './modules/conversations/contextLoader';
+
+let handoffCleanupInterval: NodeJS.Timeout | null = null;
+
+function startHandoffCleanup(): void {
+  handoffCleanupInterval = setInterval(() => {
+    sweepExpiredHandoffs().catch((error) => {
+      logger.error('Expired handoff cleanup failed', error as Error);
+    });
+  }, 60_000);
+
+  handoffCleanupInterval.unref();
+}
 
 async function startServer(): Promise<void> {
   try {
@@ -12,6 +25,7 @@ async function startServer(): Promise<void> {
 
     // Connect to Redis
     await redisClient.connect();
+    startHandoffCleanup();
 
     // Start Express server
     app.listen(config.port, () => {
@@ -30,6 +44,9 @@ process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down gracefully');
 
   try {
+    if (handoffCleanupInterval) {
+      clearInterval(handoffCleanupInterval);
+    }
     await redisClient.disconnect();
     logger.info('Redis disconnected');
   } catch (error) {
@@ -43,6 +60,9 @@ process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down gracefully');
 
   try {
+    if (handoffCleanupInterval) {
+      clearInterval(handoffCleanupInterval);
+    }
     await redisClient.disconnect();
     logger.info('Redis disconnected');
   } catch (error) {

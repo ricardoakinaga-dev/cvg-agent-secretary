@@ -15,11 +15,12 @@ function createResponse() {
   };
 }
 
-function createRequest(rawBody: Buffer, signature?: string) {
+function createRequest(rawBody: Buffer, signature?: string, timestamp?: string) {
   return {
     rawBody,
     header: vi.fn((name: string) => {
       if (name.toLowerCase() === 'x-chatwoot-signature') return signature;
+      if (name.toLowerCase() === 'x-chatwoot-timestamp') return timestamp;
       return undefined;
     }),
   } as unknown as Request;
@@ -30,6 +31,19 @@ describe('chatwoot signature middleware', () => {
     const rawBody = Buffer.from(JSON.stringify({ event: 'message_created' }));
     const signature = computeChatwootSignature(rawBody, 'test-webhook-secret');
     const req = createRequest(rawBody, `sha256=${signature}`);
+    const res = createResponse();
+    const next = vi.fn() as NextFunction;
+
+    verifyChatwootSignature(req, res, next);
+
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it('accepts the current Chatwoot timestamped signature format', () => {
+    const rawBody = Buffer.from(JSON.stringify({ event: 'message_created', id: 3570 }));
+    const timestamp = '1781147417';
+    const signature = computeChatwootSignature(rawBody, 'test-webhook-secret', timestamp);
+    const req = createRequest(rawBody, `sha256=${signature}`, timestamp);
     const res = createResponse();
     const next = vi.fn() as NextFunction;
 

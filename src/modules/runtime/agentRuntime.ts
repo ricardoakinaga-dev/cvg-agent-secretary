@@ -34,6 +34,7 @@ import {
   isOutgoingMessage,
 } from '../chatwoot/normalizer';
 import { ChatwootWebhookPayload, AgentResponse, KnowledgeChunk } from '../../shared/types';
+import { IntentClassification } from '../intent/types';
 import { generateContentDedupHash, generateMessageDedupHash } from './dedup';
 import {
   buildKnowledgeContext,
@@ -51,6 +52,13 @@ function createGreetingResponse(): AgentResponse {
   };
 }
 
+const NO_ANSWER_HANDOFF_MESSAGE = 'Desculpe, não tenho essa resposta então vou te transferir para um atendente humano.';
+
+const EMERGENCY_HANDOFF_MESSAGE = [
+  'Isso pode ser uma emergência. Venha ao hospital imediatamente para avaliação presencial.',
+  'Vou transferir a conversa para um atendente humano agora para acompanhar seu caso.',
+].join(' ');
+
 function sanitizeHistoryForPrompt(history: string[]): string[] {
   return history.map((message) => sanitizeForPrompt(message));
 }
@@ -66,6 +74,139 @@ async function sendBotMessage(conversationId: number, content: string): Promise<
     content,
   });
   await redisClient.markBotOutgoingMessageId(sentMessage.id);
+}
+
+function responseForRequiredHandoff(classification: IntentClassification): AgentResponse {
+  if (classification.intent === 'possivel_urgencia') {
+    return {
+      content: EMERGENCY_HANDOFF_MESSAGE,
+      confidence: 1,
+      action: {
+        type: 'handoff',
+        reason: classification.handoffReason || 'Emergência clínica identificada',
+        summary: 'Cliente relatou possível emergência clínica. Orientado a vir imediatamente ao hospital.',
+      },
+    };
+  }
+
+  return {
+    content: classification.intent === 'pedido_humano'
+      ? 'Vou transferir você para um atendente humano para continuar o atendimento.'
+      : NO_ANSWER_HANDOFF_MESSAGE,
+    confidence: classification.confidence,
+    action: {
+      type: 'handoff',
+      reason: classification.handoffReason || 'Atendimento requer humano',
+      summary: 'Conversa transferida para atendimento humano.',
+    },
+  };
+}
+
+function shouldHandoffForUnansweredResponse(agentResponse: AgentResponse): boolean {
+  return agentResponse.confidence < 0.6 || agentResponse.action?.type === 'fallback';
+}
+
+async function executeOperationalHandoff(params: {
+  context: Awaited<ReturnType<typeof loadConversationContext>>;
+  metadata: ReturnType<typeof extractConversationMetadata>;
+  normalizedMessage: NonNullable<ReturnType<typeof normalizeMessage>>;
+  agentResponse: AgentResponse;
+  intentClassification: IntentClassification;
+  riskLevel?: 'high' | 'medium' | 'low';
+  log: ReturnType<typeof logger.child>;
+}): Promise<void> {
+  const {
+    context,
+    metadata,
+    normalizedMessage,
+    agentResponse,
+    intentClassification,
+    riskLevel,
+    log,
+  } = params;
+
+  const action = agentResponse.action;
+  const reason = (action?.type === 'handoff' || action?.type === 'fallback' ? action.reason : undefined)
+    || intentClassification.handoffReason
+    || 'Atendimento requer humano';
+  const summary = (action?.type === 'handoff' ? action.summary : undefined)
+    || 'Conversa transferida para atendimento humano.';
+
+  let handoffId: string | undefined;
+  try {
+    const handoff = await handoffRepository.create({
+      conversationId: context.conversationId,
+      contactId: context.contactId,
+      triggerType: intentClassification.intent === 'possivel_urgencia' ? 'urgency' : 'agent_response',
+      triggerReason: reason,
+      priority: riskLevel === 'high' || intentClassification.priority === 'critical' ? 'high' : 'medium',
+      summary,
+      pendingQuestions: ['Continuar atendimento com humano.'],
+      whatWasAnswered: agentResponse.content,
+      whatIsMissing: summary,
+      riskLevel: riskLevel || intentClassification.riskLevel || 'medium',
+    });
+    handoffId = handoff.id;
+
+    await executeHandoff(
+      context.chatwootConversationId,
+      {
+        contactName: metadata.contactName,
+        conversationHistory: formatConversationHistory(context.messages),
+        whatClientWanted: normalizedMessage.content,
+        informationCollected: {
+          contactId: context.contactId,
+          provider: aiRouter.getPrimaryProvider(),
+        },
+        handoffReason: reason,
+        pendingQuestions: ['Continuar atendimento com humano.'],
+        whatWasAnswered: [agentResponse.content],
+      },
+      getLabelsForIntent(intentClassification.intent, riskLevel || intentClassification.riskLevel)
+    );
+
+    await updateConversationState(context, 'handoff', { reason });
+  } catch (handoffError) {
+    log.error('Operational handoff failed', handoffError as Error, {
+      conversationId: context.conversationId,
+    });
+
+    await analyticsService.trackEvent({
+      eventType: 'error_occurred',
+      conversationId: context.conversationId,
+      contactId: context.contactId,
+      metadata: {
+        errorType: 'handoff_failed',
+        error: (handoffError as Error).message,
+      },
+    });
+  }
+
+  await analyticsService.trackEvent({
+    eventType: 'handoff_triggered',
+    conversationId: context.conversationId,
+    contactId: context.contactId,
+    outcome: 'handoff_to_human',
+    metadata: {
+      reason,
+      summary,
+      handoffId,
+    },
+  });
+
+  await auditService.recordEvent({
+    eventType: 'handoff_triggered',
+    actor: 'system',
+    resourceType: 'conversation',
+    resourceId: context.conversationId,
+    action: 'handoff',
+    details: {
+      reason,
+      contactId: context.contactId,
+      summary,
+      handoffId,
+    },
+  });
 }
 
 function normalizeForTakeoverDetection(content: string): string {
@@ -202,11 +343,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
         action: inputGuardrail.action,
       });
 
-      await sendBotMessage(
-        normalizedMessage.chatwootConversationId,
-        generateFallbackResponse(inputGuardrail.fallbackType || 'security_block')
-      );
-
       await analyticsService.trackEvent({
         eventType: 'fallback_triggered',
         conversationId: normalizedMessage.conversationId,
@@ -314,6 +450,39 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       contactName: metadata.contactName,
     });
     const recommendedAction = getRecommendedAction(intentClassification);
+
+    if (intentClassification.requiresHandoff) {
+      const agentResponse = responseForRequiredHandoff(intentClassification);
+      await sendBotMessage(context.chatwootConversationId, agentResponse.content);
+
+      await analyticsService.trackEvent({
+        eventType: 'response_sent',
+        conversationId: context.conversationId,
+        contactId: context.contactId,
+        latency: Date.now() - startTime,
+        metadata: {
+          confidence: agentResponse.confidence,
+          action: agentResponse.action?.type,
+        },
+      });
+
+      await executeOperationalHandoff({
+        context,
+        metadata,
+        normalizedMessage,
+        agentResponse,
+        intentClassification,
+        riskLevel: intentClassification.riskLevel,
+        log,
+      });
+
+      log.info('Webhook processing completed', {
+        correlationId,
+        conversationId: context.conversationId,
+      });
+      return;
+    }
+
     const schedulingState = await markSchedulingIntent(
       context.conversationId,
       intentClassification.intent,
@@ -384,6 +553,12 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
     let agentResponse: AgentResponse;
     if (intentClassification.intent === 'saudacao') {
       agentResponse = createGreetingResponse();
+    } else if (recommendedAction.shouldUseKnowledge && knowledgeResults.length === 0) {
+      agentResponse = {
+        content: generateFallbackResponse('no_knowledge'),
+        confidence: 0,
+        action: { type: 'fallback', reason: 'knowledge_not_found' },
+      };
     } else if (isPricingQuery(normalizedMessage.content) && !hasPriceEvidence(knowledgeResults)) {
       agentResponse = {
         content: generateFallbackResponse('no_knowledge'),
@@ -460,6 +635,32 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       });
     }
 
+    if (
+      agentResponse.action?.type !== 'handoff'
+      && shouldHandoffForUnansweredResponse(agentResponse)
+      && agentResponse.action?.type !== 'respond'
+    ) {
+      agentResponse = {
+        content: NO_ANSWER_HANDOFF_MESSAGE,
+        confidence: agentResponse.confidence,
+        action: {
+          type: 'handoff',
+          reason: agentResponse.action?.reason || 'Resposta com baixa confiança',
+          summary: 'O bot não encontrou uma resposta adequada e transferiu para atendimento humano.',
+        },
+      };
+    } else if (agentResponse.confidence < 0.6 && agentResponse.action?.type !== 'handoff') {
+      agentResponse = {
+        content: NO_ANSWER_HANDOFF_MESSAGE,
+        confidence: agentResponse.confidence,
+        action: {
+          type: 'handoff',
+          reason: 'Resposta com baixa confiança',
+          summary: 'O bot não teve confiança suficiente para resolver a solicitação.',
+        },
+      };
+    }
+
     log.info('Agent response generated', {
       contentLength: agentResponse.content.length,
       confidence: agentResponse.confidence,
@@ -482,78 +683,14 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       });
 
       if (agentResponse.action?.type === 'handoff') {
-        let handoffId: string | undefined;
-        try {
-          const handoff = await handoffRepository.create({
-            conversationId: context.conversationId,
-            contactId: context.contactId,
-            triggerType: 'agent_response',
-            triggerReason: agentResponse.action.reason || 'ai_requested',
-            priority: 'high',
-            summary: agentResponse.action.summary,
-            pendingQuestions: ['Continuar atendimento com humano.'],
-            whatWasAnswered: agentResponse.content,
-            whatIsMissing: agentResponse.action.summary,
-            riskLevel: 'high',
-          });
-          handoffId = handoff.id;
-
-          await executeHandoff(
-            context.chatwootConversationId,
-            {
-              contactName: metadata.contactName,
-              conversationHistory: formatConversationHistory(context.messages),
-              whatClientWanted: normalizedMessage.content,
-              informationCollected: {
-                contactId: context.contactId,
-                provider: aiRouter.getPrimaryProvider(),
-              },
-              handoffReason: agentResponse.action.reason || 'ai_requested',
-              pendingQuestions: ['Continuar atendimento com humano.'],
-              whatWasAnswered: [agentResponse.content],
-            },
-            getLabelsForIntent('pedido_humano', 'high')
-          );
-        } catch (handoffError) {
-          log.error('Operational handoff failed', handoffError as Error, {
-            conversationId: context.conversationId,
-          });
-
-          await analyticsService.trackEvent({
-            eventType: 'error_occurred',
-            conversationId: context.conversationId,
-            contactId: context.contactId,
-            metadata: {
-              errorType: 'handoff_failed',
-              error: (handoffError as Error).message,
-            },
-          });
-        }
-
-        await analyticsService.trackEvent({
-          eventType: 'handoff_triggered',
-          conversationId: context.conversationId,
-          contactId: context.contactId,
-          outcome: 'handoff_to_human',
-          metadata: {
-            reason: agentResponse.action.reason || 'ai_requested',
-            summary: agentResponse.action.summary,
-            handoffId,
-          },
-        });
-
-        await auditService.recordEvent({
-          eventType: 'handoff_triggered',
-          actor: 'system',
-          resourceType: 'conversation',
-          resourceId: context.conversationId,
-          action: 'handoff',
-          details: {
-            reason: agentResponse.action.reason || 'ai_requested',
-            contactId: context.contactId,
-            summary: agentResponse.action.summary,
-            handoffId,
-          },
+        await executeOperationalHandoff({
+          context,
+          metadata,
+          normalizedMessage,
+          agentResponse,
+          intentClassification,
+          riskLevel: intentClassification.riskLevel,
+          log,
         });
       }
     } catch (error) {
@@ -586,6 +723,13 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
 export async function processConversationCreated(payload: ChatwootWebhookPayload): Promise<void> {
   const correlationId = randomUUID();
   const log = logger.child({ correlationId });
+
+  if (!payload.conversation) {
+    log.warn('Conversation created event missing conversation payload', {
+      payloadId: payload.id ? String(payload.id) : undefined,
+    });
+    return;
+  }
 
   log.info('Conversation created', {
     conversationId: String(payload.conversation.id),
