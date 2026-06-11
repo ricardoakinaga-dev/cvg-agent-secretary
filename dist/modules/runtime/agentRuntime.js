@@ -343,7 +343,6 @@ async function processWebhookEvent(payload) {
             });
             return;
         }
-        const schedulingState = await (0, state_1.markSchedulingIntent)(context.conversationId, intentClassification.intent, intentClassification.entities.petName);
         log.info('Runtime intent decision', {
             intent: intentClassification.intent,
             confidence: intentClassification.confidence,
@@ -384,6 +383,26 @@ async function processWebhookEvent(payload) {
                 intent: intentClassification.intent,
             });
         }
+        if ((0, context_1.hasWalkInServiceEvidence)(normalizedMessage.content, knowledgeResults)) {
+            const content = (0, context_1.buildWalkInServiceResponse)(normalizedMessage.content, knowledgeResults);
+            await sendBotMessage(context.chatwootConversationId, content);
+            await index_1.analyticsService.trackEvent({
+                eventType: 'response_sent',
+                conversationId: context.conversationId,
+                contactId: context.contactId,
+                latency: Date.now() - startTime,
+                metadata: {
+                    action: 'institutional_walk_in_policy',
+                    intent: intentClassification.intent,
+                },
+            });
+            log.info('Institutional walk-in service policy answered without scheduling', {
+                conversationId: context.conversationId,
+                intent: intentClassification.intent,
+            });
+            return;
+        }
+        const schedulingState = await (0, state_1.markSchedulingIntent)(context.conversationId, intentClassification.intent, intentClassification.entities.petName);
         const agentContext = {
             conversationId: context.conversationId,
             contactId: memoryContext.contactId ?? context.contactId,
@@ -452,6 +471,27 @@ async function processWebhookEvent(payload) {
                         error: error.message,
                     },
                 });
+            }
+        }
+        if ((0, context_1.containsSchedulingProposal)(agentResponse.content)
+            && !(0, context_1.hasSchedulingPolicyEvidence)(knowledgeResults)) {
+            if ((0, context_1.isServiceAvailabilityQuery)(normalizedMessage.content) && !(0, context_1.isSchedulingRequest)(normalizedMessage.content)) {
+                agentResponse = {
+                    content: (0, context_1.buildServiceAvailabilityResponse)(normalizedMessage.content, knowledgeResults),
+                    confidence: 0.9,
+                    action: { type: 'respond', content: 'institutional_service_info' },
+                };
+            }
+            else if (intentClassification.intent === 'agendamento') {
+                agentResponse = {
+                    content: 'Para evitar informação incorreta, preciso confirmar a forma de atendimento e disponibilidade desse serviço com um atendente humano.',
+                    confidence: 0,
+                    action: {
+                        type: 'handoff',
+                        reason: 'Agendamento sem evidência institucional ou agenda confiável',
+                        summary: 'Tutor pediu agendamento, mas a base recuperada não confirmou que o serviço é agendável.',
+                    },
+                };
             }
         }
         const responseGuardrail = (0, guardrails_1.checkResponseGuardrails)(agentResponse.content);

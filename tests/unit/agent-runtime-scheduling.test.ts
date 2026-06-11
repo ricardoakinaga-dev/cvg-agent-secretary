@@ -233,6 +233,15 @@ describe('agent runtime scheduling state machine', () => {
   });
 
   it('processes the normal Chatwoot to RAG to AI to Chatwoot path', async () => {
+    vi.mocked(classifyIntent).mockReturnValue({
+      intent: 'horarios',
+      confidence: 0.85,
+      priority: 'low',
+      detectedKeywords: ['horarios'],
+      entities: {},
+      requiresHandoff: false,
+      riskLevel: 'low',
+    });
     mockKnowledgeRetrieval.search.mockResolvedValue([
       {
         id: 'chunk-1',
@@ -243,6 +252,11 @@ describe('agent runtime scheduling state machine', () => {
         title: 'Consultas',
       },
     ]);
+    mockAiRouter.generate.mockResolvedValue({
+      content: 'O atendimento funciona de segunda a sabado, das 8h as 18h.',
+      confidence: 0.92,
+      action: { type: 'respond', content: 'ok' },
+    });
 
     await processWebhookEvent(createPayload('qual o horario de atendimento?'));
 
@@ -270,7 +284,7 @@ describe('agent runtime scheduling state machine', () => {
     });
     expect(mockChatwoot.sendMessage).toHaveBeenCalledWith({
       conversationId: 123,
-      content: 'A consulta custa R$ 120 e posso verificar horarios para voce.',
+      content: 'O atendimento funciona de segunda a sabado, das 8h as 18h.',
     });
     expect(mockAnalytics.trackEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'response_sent',
@@ -367,6 +381,78 @@ describe('agent runtime scheduling state machine', () => {
       content: 'Desculpe, não tenho essa resposta então vou te transferir para um atendente humano.',
     });
     expect(mockChatwootIntegration.executeHandoff).toHaveBeenCalled();
+  });
+
+  it('answers walk-in clinic service from institutional knowledge without proposing scheduling', async () => {
+    mockKnowledgeRetrieval.search.mockResolvedValue([
+      {
+        id: 'chunk-walk-in',
+        content: 'Clínica médica: atendimento por ordem de chegada. Não necessita agendamento.',
+        source: 'qdrant',
+        relevance: 0.96,
+        category: 'service',
+        title: 'Atendimento clínica médica',
+      },
+    ]);
+    mockAiRouter.generate.mockResolvedValue({
+      content: 'Posso verificar horários para agendar clínica médica.',
+      confidence: 0.92,
+      action: { type: 'respond', content: 'schedule' },
+    });
+
+    await processWebhookEvent(createPayload('quero agendar atendimento da clínica médica'));
+
+    expect(mockKnowledgeRetrieval.search).toHaveBeenCalledWith({
+      query: 'quero agendar atendimento da clínica médica',
+      limit: 3,
+      minRelevance: 0.7,
+    });
+    expect(mockSchedulingState.markSchedulingIntent).not.toHaveBeenCalled();
+    expect(mockAiRouter.generate).not.toHaveBeenCalled();
+    expect(mockChatwoot.sendMessage).toHaveBeenCalledWith({
+      conversationId: 123,
+      content: 'O atendimento de clínica médica é por ordem de chegada e não precisa de agendamento. Você pode ir diretamente ao Centro Veterinário Guarapiranga para atendimento.',
+    });
+  });
+
+  it('removes unsupported scheduling offers from service availability answers', async () => {
+    vi.mocked(classifyIntent).mockReturnValue({
+      intent: 'servicos',
+      confidence: 0.85,
+      priority: 'low',
+      detectedKeywords: ['servicos'],
+      entities: {},
+      requiresHandoff: false,
+      riskLevel: 'low',
+    });
+    mockKnowledgeRetrieval.search.mockResolvedValue([
+      {
+        id: 'chunk-exams',
+        content: 'Serviços disponíveis: exames de sangue, raio-x e ultrassonografia.',
+        source: 'qdrant',
+        relevance: 0.94,
+        category: 'service',
+        title: 'Exames',
+      },
+    ]);
+    mockAiRouter.generate.mockResolvedValue({
+      content: 'Sim, temos exames de sangue, raio-x e ultrassom. Posso ajudar a agendar, me informe a data e horário.',
+      confidence: 0.92,
+      action: { type: 'respond', content: 'service_with_schedule_offer' },
+    });
+
+    await processWebhookEvent(createPayload('Vc tem exames de sangue, RX e ultrassom?'));
+
+    expect(mockAiRouter.generate).toHaveBeenCalled();
+    expect(mockSchedulingState.markSchedulingIntent).toHaveBeenCalledWith(
+      'conversation-1',
+      'servicos',
+      undefined
+    );
+    expect(mockChatwoot.sendMessage).toHaveBeenCalledWith({
+      conversationId: 123,
+      content: 'Sim, o Centro Veterinário Guarapiranga realiza exames de sangue, raio-x e ultrassonografia. Para preparo, disponibilidade e forma de atendimento, um atendente pode confirmar os detalhes sem gerar informação incorreta sobre agenda.',
+    });
   });
 
   it('silently ignores messages blocked by input guardrails', async () => {

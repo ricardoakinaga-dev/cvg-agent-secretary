@@ -38,10 +38,17 @@ import { IntentClassification } from '../intent/types';
 import { generateContentDedupHash, generateMessageDedupHash } from './dedup';
 import {
   buildKnowledgeContext,
+  buildServiceAvailabilityResponse,
+  buildWalkInServiceResponse,
+  containsSchedulingProposal,
   hasHoursEvidence,
   hasPriceEvidence,
+  hasSchedulingPolicyEvidence,
+  hasWalkInServiceEvidence,
   isHoursQuery,
   isPricingQuery,
+  isSchedulingRequest,
+  isServiceAvailabilityQuery,
 } from '../knowledge/context';
 
 function createGreetingResponse(): AgentResponse {
@@ -483,12 +490,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       return;
     }
 
-    const schedulingState = await markSchedulingIntent(
-      context.conversationId,
-      intentClassification.intent,
-      intentClassification.entities.petName
-    );
-
     log.info('Runtime intent decision', {
       intent: intentClassification.intent,
       confidence: intentClassification.confidence,
@@ -534,6 +535,34 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
         intent: intentClassification.intent,
       });
     }
+
+    if (hasWalkInServiceEvidence(normalizedMessage.content, knowledgeResults)) {
+      const content = buildWalkInServiceResponse(normalizedMessage.content, knowledgeResults);
+      await sendBotMessage(context.chatwootConversationId, content);
+
+      await analyticsService.trackEvent({
+        eventType: 'response_sent',
+        conversationId: context.conversationId,
+        contactId: context.contactId,
+        latency: Date.now() - startTime,
+        metadata: {
+          action: 'institutional_walk_in_policy',
+          intent: intentClassification.intent,
+        },
+      });
+
+      log.info('Institutional walk-in service policy answered without scheduling', {
+        conversationId: context.conversationId,
+        intent: intentClassification.intent,
+      });
+      return;
+    }
+
+    const schedulingState = await markSchedulingIntent(
+      context.conversationId,
+      intentClassification.intent,
+      intentClassification.entities.petName
+    );
 
     const agentContext = {
       conversationId: context.conversationId,
@@ -602,6 +631,29 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
             error: (error as Error).message,
           },
         });
+      }
+    }
+
+    if (
+      containsSchedulingProposal(agentResponse.content)
+      && !hasSchedulingPolicyEvidence(knowledgeResults)
+    ) {
+      if (isServiceAvailabilityQuery(normalizedMessage.content) && !isSchedulingRequest(normalizedMessage.content)) {
+        agentResponse = {
+          content: buildServiceAvailabilityResponse(normalizedMessage.content, knowledgeResults),
+          confidence: 0.9,
+          action: { type: 'respond', content: 'institutional_service_info' },
+        };
+      } else if (intentClassification.intent === 'agendamento') {
+        agentResponse = {
+          content: 'Para evitar informação incorreta, preciso confirmar a forma de atendimento e disponibilidade desse serviço com um atendente humano.',
+          confidence: 0,
+          action: {
+            type: 'handoff',
+            reason: 'Agendamento sem evidência institucional ou agenda confiável',
+            summary: 'Tutor pediu agendamento, mas a base recuperada não confirmou que o serviço é agendável.',
+          },
+        };
       }
     }
 
