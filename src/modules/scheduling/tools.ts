@@ -6,8 +6,22 @@ import {
   CancelAppointmentInput,
   CheckAvailableSlotsInput,
   ConfirmAppointmentInput,
+  RescheduleAppointmentInput,
   ReserveSlotInput,
 } from './types';
+
+function hasOwnership(
+  input: { conversationId?: string; contactId?: string }
+): input is { conversationId: string; contactId: string } {
+  return Boolean(input.conversationId?.trim() && input.contactId?.trim());
+}
+
+function ownershipFailure(): { success: false; message: string } {
+  return {
+    success: false,
+    message: 'Appointment ownership context is required',
+  };
+}
 
 export async function checkAvailableSlots(input: CheckAvailableSlotsInput): Promise<{
   success: boolean;
@@ -27,6 +41,10 @@ export async function reserveSlot(input: ReserveSlotInput): Promise<{
   appointment?: Appointment;
   message: string;
 }> {
+  if (!hasOwnership(input)) {
+    return ownershipFailure();
+  }
+
   try {
     const appointment = await schedulingRepository.reserveSlot(input);
     return {
@@ -38,7 +56,7 @@ export async function reserveSlot(input: ReserveSlotInput): Promise<{
     logger.error('Tool reserve_slot failed', error as Error);
     return {
       success: false,
-      message: (error as Error).message,
+      message: 'Unable to reserve slot',
     };
   }
 }
@@ -48,6 +66,10 @@ export async function confirmAppointment(input: ConfirmAppointmentInput): Promis
   appointment?: Appointment;
   message: string;
 }> {
+  if (!hasOwnership(input)) {
+    return ownershipFailure();
+  }
+
   try {
     const appointment = await schedulingRepository.confirmAppointment(input);
     return {
@@ -59,7 +81,7 @@ export async function confirmAppointment(input: ConfirmAppointmentInput): Promis
     logger.error('Tool confirm_appointment failed', error as Error);
     return {
       success: false,
-      message: (error as Error).message,
+      message: 'Unable to confirm appointment',
     };
   }
 }
@@ -69,6 +91,10 @@ export async function cancelAppointment(input: CancelAppointmentInput): Promise<
   appointment?: Appointment;
   message: string;
 }> {
+  if (!hasOwnership(input)) {
+    return ownershipFailure();
+  }
+
   try {
     const appointment = await schedulingRepository.cancelAppointment(input);
     return {
@@ -80,22 +106,34 @@ export async function cancelAppointment(input: CancelAppointmentInput): Promise<
     logger.error('Tool cancel_appointment failed', error as Error);
     return {
       success: false,
-      message: (error as Error).message,
+      message: 'Unable to cancel appointment',
     };
   }
 }
 
-export async function rescheduleAppointment(input: CancelAppointmentInput & ReserveSlotInput): Promise<{
+export async function rescheduleAppointment(input: RescheduleAppointmentInput): Promise<{
   success: boolean;
   appointment?: Appointment;
   message: string;
 }> {
-  const cancelled = await cancelAppointment({ appointmentId: input.appointmentId, reason: input.reason });
-  if (!cancelled.success) {
-    return cancelled;
+  if (!hasOwnership(input)) {
+    return ownershipFailure();
   }
 
-  return reserveSlot(input);
+  try {
+    const appointment = await schedulingRepository.rescheduleAppointment(input);
+    return {
+      success: true,
+      appointment,
+      message: 'Appointment rescheduled',
+    };
+  } catch (error) {
+    logger.error('Tool reschedule_appointment failed', error as Error);
+    return {
+      success: false,
+      message: 'Unable to reschedule appointment',
+    };
+  }
 }
 
 export const schedulingTools = {

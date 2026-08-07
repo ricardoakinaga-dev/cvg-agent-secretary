@@ -41,6 +41,9 @@ Tutor -> WhatsApp -> EvolutionAPI -> Chatwoot -> agent-secretary -> Chatwoot -> 
 
 - Webhook received: yes/no
 - Signature accepted: yes/no
+- Timestamp/header format captured without secret: yes/no
+- Account and inbox matched the configured allowlist: yes/no
+- Replayed delivery rejected without duplicate response/tool: yes/no
 - Message normalized: yes/no
 - Knowledge/RAG executed: yes/no
 - AI or tool executed: yes/no
@@ -72,6 +75,11 @@ Tutor -> WhatsApp -> EvolutionAPI -> Chatwoot -> agent-secretary -> Chatwoot -> 
 - Chatwoot label/note:
 
 ## Decision
+
+- Privacy/DPO approval linked:
+- Restore/RPO/RTO evidence linked:
+- Image scan/SBOM linked:
+- Load/restart evidence linked:
 
 - [ ] Go
 - [ ] No-Go

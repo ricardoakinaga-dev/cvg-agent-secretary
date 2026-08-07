@@ -155,6 +155,7 @@ describe('OpenAI tool calling flow', () => {
         conversationId: 'conversation-1',
         contactId: 'contact-1',
         contactName: 'Maria',
+        userMessage: 'quero agendar consulta para o Buddy',
       }
     );
     expect(mockExecuteAgentTool).toHaveBeenNthCalledWith(
@@ -169,6 +170,7 @@ describe('OpenAI tool calling flow', () => {
         conversationId: 'conversation-1',
         contactId: 'contact-1',
         contactName: 'Maria',
+        userMessage: 'quero agendar consulta para o Buddy',
       }
     );
 
@@ -185,6 +187,125 @@ describe('OpenAI tool calling flow', () => {
         content: expect.stringContaining('"appointment"'),
       }),
     ]));
+  });
+
+  it('sends only minimized context to OpenAI while retaining trusted tool authorization context', async () => {
+    mockChatCreate
+      .mockResolvedValueOnce(toolResponse(
+        'reserve_slot',
+        {
+          slotId: 'slot-1',
+          petName: '[PET_1]',
+          reason: 'Consulta clinica',
+        },
+        'call-reserve'
+      ))
+      .mockResolvedValueOnce(finalResponse('Deixei o horario reservado temporariamente.'));
+    mockExecuteAgentTool.mockResolvedValueOnce({
+      success: true,
+      appointment: {
+        id: 'appointment-1',
+        status: 'reserved',
+        petId: 'pet-private-1',
+        petName: 'Buddy',
+        tutorName: 'Maria',
+      },
+    });
+
+    const privateContext: AgentContext = {
+      ...baseContext,
+      conversationHistory: [
+        'Maria escreveu de maria@example.com sobre Buddy e o CPF 123.456.789-01.',
+      ],
+      memories: ['MEMORIA BRUTA: Maria prefere o veterinario Dr. Carlos.'],
+      pets: [{
+        id: 'pet-private-1',
+        name: 'Buddy',
+        species: 'cachorro',
+        breed: 'Golden Retriever',
+      }],
+      knowledge: [{
+        id: 'knowledge-1',
+        content: 'Consultas gerais seguem ordem de chegada.',
+        source: 'manual',
+        relevance: 0.92,
+      }],
+    };
+
+    const client = new OpenAIClient();
+    await client.generateResponse(
+      'Maria quer reservar para Buddy. E-mail maria@example.com, CPF 123.456.789-01.',
+      privateContext
+    );
+
+    const providerPayload = JSON.stringify(mockChatCreate.mock.calls[0][0].messages);
+    expect(providerPayload).not.toContain('Maria');
+    expect(providerPayload).not.toContain('Buddy');
+    expect(providerPayload).not.toContain('maria@example.com');
+    expect(providerPayload).not.toContain('123.456.789-01');
+    expect(providerPayload).not.toContain('MEMORIA BRUTA');
+    expect(providerPayload).not.toContain('pet-private-1');
+    expect(providerPayload).not.toContain('Golden Retriever');
+    expect(providerPayload).toContain('[TUTOR]');
+    expect(providerPayload).toContain('[PET_1]');
+
+    const followupPayload = JSON.stringify(mockChatCreate.mock.calls[1][0].messages);
+    expect(followupPayload).not.toContain('pet-private-1');
+    expect(followupPayload).not.toContain('Buddy');
+    expect(followupPayload).not.toContain('Maria');
+
+    expect(mockExecuteAgentTool).toHaveBeenCalledWith(
+      'reserve_slot',
+      JSON.stringify({
+        slotId: 'slot-1',
+        petName: 'Buddy',
+        reason: 'Consulta clinica',
+      }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        contactName: 'Maria',
+        userMessage: 'Maria quer reservar para Buddy. E-mail maria@example.com, CPF 123.456.789-01.',
+      }
+    );
+  });
+
+  it('derives conservative confidence from finish reason and available evidence', async () => {
+    mockChatCreate.mockResolvedValueOnce(finalResponse('Resposta baseada na base institucional.'));
+
+    const client = new OpenAIClient();
+    const withEvidence = await client.generateResponse('qual o horario?', {
+      ...baseContext,
+      knowledge: [{
+        id: 'knowledge-1',
+        content: 'Atendimento das 8h as 18h.',
+        source: 'manual',
+        relevance: 0.91,
+      }],
+    });
+
+    expect(withEvidence.confidence).toBeGreaterThanOrEqual(0.6);
+    expect(withEvidence.confidence).toBeLessThan(0.8);
+
+    mockChatCreate.mockResolvedValueOnce({
+      choices: [{
+        finish_reason: 'length',
+        message: { role: 'assistant', content: 'Resposta incompleta' },
+      }],
+    });
+
+    const truncated = await client.generateResponse('duvida generica', baseContext);
+    expect(truncated.confidence).toBeLessThan(0.6);
+  });
+
+  it('propagates provider failures so the AI router can use its fallback provider', async () => {
+    mockChatCreate.mockRejectedValueOnce(new Error('OpenAI unavailable'));
+
+    const client = new OpenAIClient();
+
+    await expect(client.generateResponse('olá', baseContext))
+      .rejects
+      .toThrow('OpenAI unavailable');
   });
 
   it('returns fallback when availability tool cannot provide reliable slots', async () => {
@@ -282,6 +403,7 @@ describe('OpenAI tool calling flow', () => {
         conversationId: 'conversation-1',
         contactId: 'contact-1',
         contactName: 'Maria',
+        userMessage: 'sim, pode confirmar',
       }
     );
 

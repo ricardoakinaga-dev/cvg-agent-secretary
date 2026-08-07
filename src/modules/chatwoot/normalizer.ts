@@ -7,6 +7,58 @@ import {
   ChatwootMessageType,
 } from '../../shared/types';
 
+export interface ChatwootSourcePolicy {
+  accountId: string;
+  inboxIds: readonly number[];
+}
+
+export type ChatwootSourceValidation =
+  | { valid: true; accountId: number; inboxId: number }
+  | { valid: false; reason: 'account' | 'inbox' };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+/**
+ * Verifies the tenant boundary before a webhook can enter the queue.
+ * Both account locations are checked when Chatwoot includes both values.
+ */
+export function validateChatwootSource(
+  payload: unknown,
+  policy: ChatwootSourcePolicy
+): ChatwootSourceValidation {
+  if (!isRecord(payload) || !isRecord(payload.conversation)) {
+    return { valid: false, reason: 'account' };
+  }
+
+  const conversation = payload.conversation;
+  const topLevelAccount = isRecord(payload.account) ? payload.account.id : undefined;
+  const accountValues = [conversation.account_id, topLevelAccount]
+    .filter((value): value is number => typeof value === 'number');
+  const expectedAccountId = Number(policy.accountId);
+
+  if (
+    !Number.isSafeInteger(expectedAccountId)
+    || expectedAccountId <= 0
+    || accountValues.length === 0
+    || accountValues.some((accountId) => accountId !== expectedAccountId)
+  ) {
+    return { valid: false, reason: 'account' };
+  }
+
+  const inboxId = conversation.inbox_id;
+  if (
+    typeof inboxId !== 'number'
+    || !Number.isSafeInteger(inboxId)
+    || !policy.inboxIds.includes(inboxId)
+  ) {
+    return { valid: false, reason: 'inbox' };
+  }
+
+  return { valid: true, accountId: expectedAccountId, inboxId };
+}
+
 export function normalizeChatwootMessageType(
   messageType: ChatwootMessageType | undefined
 ): 'incoming' | 'outgoing' | null {
@@ -42,15 +94,18 @@ export function getWebhookMessage(payload: ChatwootWebhookPayload): ChatwootMess
     return null;
   }
 
+  const contact = getContact(payload);
+  const inferredSenderType = normalizeChatwootMessageType(payload.message_type) === 'outgoing'
+    ? 'user'
+    : 'contact';
+
   return {
     id: payload.id,
     content: payload.content || '',
     message_type: payload.message_type,
-    sender: payload.sender || {
-      id: getContact(payload).id,
-      name: getContact(payload).name,
-      type: 'contact',
-    },
+    sender: payload.sender
+      ? { ...payload.sender, type: payload.sender.type || inferredSenderType }
+      : { id: contact.id, name: contact.name, type: inferredSenderType },
     attachments: payload.attachments || [],
     private: payload.private || false,
   };

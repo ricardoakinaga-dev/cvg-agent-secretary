@@ -1,146 +1,150 @@
 # CVG Secretary Agent
 
-AI-powered virtual receptionist for veterinary hospital, integrated with Chatwoot and OpenAI.
+Agente de atendimento do Centro Veterinário Guarapiranga, integrado ao Chatwoot, PostgreSQL, Redis, Qdrant e provedores de IA.
 
-## Overview
+O runtime recebe webhooks assinados do Chatwoot, valida conta e inbox, enfileira o DTO no Redis e processa a conversa de forma assíncrona. O agente usa conhecimento institucional publicado, ferramentas de agenda, handoff humano e guardrails clínicos.
 
-The CVG Secretary Agent is an intelligent virtual assistant that handles customer service inquiries through the Chatwoot messaging platform. It uses OpenAI's GPT models to generate natural, contextually appropriate responses while maintaining strict safety guardrails for veterinary medical contexts.
+## Estado atual
 
-## Phase 1 Status
+O projeto inclui:
 
-This is the Phase 1 implementation which includes:
+- autenticação operacional por JWT RS256 e RBAC;
+- webhook HMAC com timestamp, replay protection e validação estrita;
+- fila Redis com lease, heartbeat, retry atrasado, DLQ limitada e correlation ID;
+- persistência tenant-aware com RLS em PostgreSQL;
+- RAG PostgreSQL/Qdrant com isolamento por tenant;
+- recepção estruturada por perfil e motivo, com coleta mínima e contexto persistido;
+- minimização de dados antes de OpenAI/OpenRouter;
+- agenda com ownership e confirmação corroborada pelo turno do usuário;
+- handoff, auditoria, métricas, readiness e graceful shutdown;
+- suíte determinística de segurança clínica e CI com audit/SBOM.
+- API de privacidade governada por policy, checkpoint, RBAC e comprovantes auditáveis.
 
-- ✅ Webhook endpoint for Chatwoot
-- ✅ Message normalization
-- ✅ Basic deduplication (Redis-based)
-- ✅ Conversation context management
-- ✅ OpenAI integration for response generation
-- ✅ Response sending back to Chatwoot
-- ✅ Structured logging
-- ✅ Health check endpoints
+A fonte de verdade da remediação é:
 
-### Out of Scope (Phase 1)
+- [Auditoria atual](docs/63_current_project_code_audit.md)
+- [Plano executivo](docs/64_executive_remediation_plan.md)
+- [Roadmap](docs/65_remediation_roadmap.md)
+- [Backlog rastreável](docs/66_remediation_backlog.md)
 
-- Persistent memory (Phase 2)
-- RAG/Knowledge base (Phase 3)
-- Advanced handoff system (Phase 4)
-- Telegram ingestion (Phase 5)
+## Requisitos
 
-## Project Structure
+- Node.js 20.19+ (ou versão compatível definida em `package.json`)
+- Docker Compose, ou PostgreSQL 15+/Redis 7+/Qdrant provisionados separadamente
+- conta e credenciais do Chatwoot
+- credencial OpenAI e, opcionalmente, OpenRouter
+- par de chaves/IdP capaz de emitir JWT RS256 para a API operacional
 
-```
-src/
-├── config/              # Configuration management
-├── modules/
-│   ├── chatwoot/       # Chatwoot integration (normalizer, client)
-│   ├── conversations/  # Conversation context management
-│   ├── logging/        # Structured logging
-│   ├── openai/         # OpenAI client and prompts
-│   └── runtime/        # Agent runtime orchestrator
-├── shared/              # Shared types and utilities
-│   ├── redis.ts        # Redis client
-│   └── types.ts        # TypeScript interfaces
-├── app.ts              # Express application
-└── server.ts           # Server entry point
-```
-
-## Prerequisites
-
-- Node.js 18+
-- Redis
-- PostgreSQL
-- Chatwoot account
-- OpenAI API key
-
-## Setup
-
-1. **Install dependencies:**
-   ```bash
-   npm install
-   ```
-
-2. **Configure environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   ```
-
-3. **Set up database:**
-   ```bash
-   psql -U postgres -d cvg_agent -f database/schema.sql
-   ```
-
-4. **Start the server:**
-   ```bash
-   # Development
-   npm run dev
-
-   # Production
-   npm run build
-   npm start
-   ```
-
-## Configuration
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `NODE_ENV` | Environment (development/production) | Yes |
-| `PORT` | Server port (default: 3000) | Yes |
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `REDIS_URL` | Redis connection URL | Yes |
-| `OPENAI_API_KEY` | OpenAI API key | Yes |
-| `CHATWOOT_API_URL` | Chatwoot instance URL | Yes |
-| `CHATWOOT_API_TOKEN` | Chatwoot API token | Yes |
-| `CHATWOOT_ACCOUNT_ID` | Chatwoot account ID | Yes |
-
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check with dependency status |
-| `/ready` | GET | Readiness probe |
-| `/webhooks/chatwoot` | POST | Chatwoot webhook receiver |
-
-## Testing
+## Desenvolvimento local
 
 ```bash
-# Run all tests
+cp .env.example .env
+npm ci
+npm run typecheck
 npm test
-
-# Run tests with coverage
-npm test -- --coverage
+npm run dev
 ```
 
-## Chatwoot Webhook Setup
+Os valores de `.env.example` são exemplos e não devem ser usados em produção.
 
-1. Go to Chatwoot → Settings → Integrations → Webhooks
-2. Add new webhook:
-   - **URL**: `https://your-domain.com/webhooks/chatwoot`
-   - **Events**: Select `message_created`, `conversation_created`
-3. Configure the webhook secret in `.env` for signature verification (optional)
+## Execução com Compose
 
-## Agent Persona
+Preencha no `.env`, no mínimo, as credenciais distintas de migração/aplicação PostgreSQL, a identidade ACL do Redis, Chatwoot, JWT, IA e Qdrant. Em seguida:
 
-The agent is programmed with the following characteristics:
+```bash
+docker compose config
+docker compose up --build
+```
 
-- **Tone**: Educated, friendly, professional
-- **Language**: Portuguese (Brazil)
-- **Behavior**: 
-  - Never provides medical diagnoses
-  - Never prescribes medications
-  - Always suggests veterinary consultation for health concerns
-  - Escalates to human agent for complex situations
+O Compose:
 
-## Future Phases
+- cria uma role PostgreSQL de aplicação sem DDL/superuser;
+- protege Redis com usuário, senha e escopo de chaves `cvg:*`;
+- executa migrations com lock, checksum e ledger;
+- vincula a porta da aplicação a `127.0.0.1:3023` para uso atrás de proxy TLS.
 
-See [PHASES.md](specs/PHASES.md) for detailed roadmap:
+Para stores externos, produção exige transporte TLS verificado. `ALLOW_INSECURE_PRIVATE_STORES=true` deve ser usado somente em rede privada comprovada, como a rede interna do Compose.
 
-- **Phase 2**: Persistent memory and customer data
-- **Phase 3**: RAG knowledge base
-- **Phase 4**: Full handoff system
-- **Phase 5**: Telegram ingestion
-- **Phase 6**: Security and observability
+## Migrations
 
-## License
+Depois do build:
 
-Proprietary - CVG Hospital Veterinário
+```bash
+npm run build
+MIGRATION_DATABASE_URL='postgresql://...' CHATWOOT_ACCOUNT_ID=1 npm run migrate
+```
+
+O runner aplica apenas arquivos `YYYYMMDD_nome.sql`, em ordem, com advisory lock, checksum e transação. Uma migration já aplicada com conteúdo alterado falha fechada.
+
+## Configuração principal
+
+| Variável | Finalidade |
+|---|---|
+| `DATABASE_URL` | Conexão da role de aplicação |
+| `MIGRATION_DATABASE_URL` | Conexão privilegiada usada somente pelo job de migration |
+| `ALLOW_INSECURE_PRIVATE_STORES` | Exceção explícita para rede privada sem TLS |
+| `REDIS_URL`, `REDIS_USERNAME`, `REDIS_PASSWORD` | Store distribuído, fila e rate limit |
+| `CHATWOOT_API_URL`, `CHATWOOT_API_TOKEN` | API Chatwoot |
+| `CHATWOOT_ACCOUNT_ID`, `CHATWOOT_INBOX_IDS` | Fronteira de tenant e allowlist de inbox |
+| `CHATWOOT_WEBHOOK_SECRET` | HMAC obrigatório do webhook |
+| `API_JWT_PUBLIC_KEY`, `API_JWT_ISSUER`, `API_JWT_AUDIENCE` | Identidade assinada da API |
+| `OPENAI_API_KEY`, `OPENAI_MODEL` | Provedor primário |
+| `AI_PROVIDER`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` | Roteamento/fallback opcional |
+| `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION` | Vector store |
+| `TRUST_PROXY_HOPS` | Número explícito de proxies confiáveis |
+| `PRIVACY_ENABLED` | Ativa API de privacidade somente após aprovação formal |
+| `PRIVACY_RETENTION_POLICIES_JSON` | Policies versionadas de retenção/expurgo |
+| `PRIVACY_RECOVERY_CHECKPOINTS_JSON` | Catálogo de checkpoints verificados por tenant |
+| `PRIVACY_QDRANT_ATTESTATION_ID`, `PRIVACY_LOGS_ATTESTATION_ID` | Atestações versionadas de ausência de PII |
+| `PII_ENCRYPTION_REQUIRED`, `PII_ACTIVE_KEY_ID` | Ativação obrigatória em produção e ID da chave AES-256-GCM de escrita |
+| `PII_ENCRYPTION_KEYS_JSON`, `PII_LOOKUP_KEY` | Key ring base64 e chave HMAC separada, fornecidas pelo secret manager |
+
+Consulte `.env.example` para a lista completa e limites.
+
+Após aplicar a migration de criptografia, proteja os registros legados (ou regrave com a nova chave ativa) antes de subir as replicas:
+
+```bash
+npm run build
+PII_ENCRYPTION_REQUIRED=true npm run pii:backfill
+```
+
+## Endpoints
+
+| Endpoint | Acesso | Uso |
+|---|---|---|
+| `GET /health` | local/orquestrador | liveness sem chamadas externas |
+| `GET /ready` | orquestrador | readiness cacheada de PostgreSQL/Redis |
+| `POST /webhooks/chatwoot` | HMAC Chatwoot | entrada assíncrona |
+| `/api/knowledge/*` | JWT + RBAC | curadoria e publicação |
+| `/api/scheduling/*` | JWT + RBAC | administração da agenda |
+| `GET /api/analytics/dashboard` | JWT + `analytics:read` | painel operacional |
+| `GET /api/audit/events` | JWT + `audit:read` | trilha de auditoria |
+| `GET /api/metrics?format=prometheus` | JWT + `analytics:read` | scrape Prometheus/OpenMetrics |
+| `/api/privacy/*` | JWT + `privacy:read/delete` | retenção e direitos do titular; desativado sem policy aprovada |
+
+## Qualidade
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run test:coverage
+npm run test:integration:stores
+npm run build
+npm audit --omit=dev --audit-level=low
+npm run sbom > sbom.cdx.json
+```
+
+A cobertura bloqueia abaixo de 80% de linhas, 80% de funções ou 70% de branches. A suíte clínica em `tests/evals/` roda junto com os testes normais. A integração de stores exige o ambiente descartável descrito no CI. Testes de staging e WhatsApp exigem ambiente e credenciais reais; veja os scripts `smoke:*` e os runbooks em `docs/`.
+
+## Segurança operacional
+
+- Nunca use os segredos de exemplo.
+- Não habilite `ALLOW_LEGACY_API_TOKEN` em produção.
+- Não exponha a porta Node diretamente à internet; use proxy TLS e configure `TRUST_PROXY_HOPS`.
+- Faça rotação de JWT, Chatwoot, Redis, PostgreSQL, Qdrant e provedores de IA conforme o runbook.
+- Um smoke interno não substitui a homologação E2E no Chatwoot/WhatsApp real.
+
+## Licença
+
+Proprietário — Centro Veterinário Guarapiranga.

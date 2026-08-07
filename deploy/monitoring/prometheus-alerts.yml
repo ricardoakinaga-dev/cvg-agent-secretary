@@ -1,0 +1,124 @@
+groups:
+  - name: cvg-agent-secretary-availability
+    rules:
+      - alert: CvgAgentUnavailable
+        expr: absent(up{job="cvg-agent-secretary"}) or max without(instance, pod) (up{job="cvg-agent-secretary"}) == 0
+        for: 2m
+        labels: { severity: critical, owner: platform }
+        annotations:
+          summary: No CVG Agent Secretary replica is observable
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgAgentReplicaUnavailable
+        expr: up{job="cvg-agent-secretary"} == 0
+        for: 5m
+        labels: { severity: warning, owner: platform }
+        annotations:
+          summary: At least one CVG Agent Secretary replica is unavailable
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgDependencyUnavailable
+        expr: cvg:dependency_up:min == 0
+        for: 3m
+        labels: { severity: critical, owner: platform }
+        annotations:
+          summary: A required application dependency is unavailable
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgMetricsCollectionStale
+        expr: cvg:webhook_queue_collection_up:min == 0 or absent(cvg:webhook_queue_collection_up:min)
+        for: 5m
+        labels: { severity: warning, owner: platform }
+        annotations:
+          summary: Shared queue telemetry cannot be collected
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+
+  - name: cvg-agent-secretary-queue
+    rules:
+      - alert: CvgWebhookDeadLettered
+        expr: cvg:webhook_dlq_increase:5m > 0
+        for: 0m
+        labels: { severity: critical, owner: backend }
+        annotations:
+          summary: A Chatwoot webhook reached the dead-letter queue
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgWebhookDeadLetterBacklog
+        expr: cvg:webhook_queue_depth:max{state="dead_letter"} > 0
+        for: 15m
+        labels: { severity: critical, owner: backend }
+        annotations:
+          summary: The webhook dead-letter queue has not been reconciled
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgWebhookQueueAgeHigh
+        expr: cvg:webhook_queue_oldest_age_seconds:max > 30
+        for: 10m
+        labels: { severity: warning, owner: platform }
+        annotations:
+          summary: Oldest actionable webhook has waited more than 30 seconds
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgWebhookQueueBacklogHigh
+        expr: sum without(state) (cvg:webhook_queue_depth:max{state=~"pending|inflight|delayed"}) > 100
+        for: 10m
+        labels: { severity: warning, owner: platform }
+        annotations:
+          summary: Actionable webhook backlog exceeded 100 jobs
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgWebhookRetryBurst
+        expr: sum without(instance, pod) (increase(webhook_retries_total[10m])) > 10
+        for: 5m
+        labels: { severity: warning, owner: backend }
+        annotations:
+          summary: Webhook retries exceeded the operational threshold
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgWebhookProcessingErrorRateHigh
+        expr: cvg:webhook_processing_error_ratio:rate5m > 0.05
+        for: 10m
+        labels: { severity: critical, owner: backend }
+        annotations:
+          summary: Webhook processing error rate is above 5 percent
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgWebhookProcessingLatencyHigh
+        expr: cvg:webhook_processing_duration_seconds:p95_5m > 5
+        for: 10m
+        labels: { severity: warning, owner: backend }
+        annotations:
+          summary: Webhook processing p95 is above 5 seconds
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+
+  - name: cvg-agent-secretary-service-quality
+    rules:
+      - alert: CvgResponseLatencyHigh
+        expr: cvg:response_duration_seconds:p95_5m > 10
+        for: 10m
+        labels: { severity: warning, owner: backend }
+        annotations:
+          summary: End-to-end response p95 is above 10 seconds
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgHandoffRateHigh
+        expr: cvg:handoff_ratio:rate15m > 0.30
+        for: 15m
+        labels: { severity: warning, owner: operations }
+        annotations:
+          summary: Human handoff ratio is above 30 percent
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgAiProviderErrorRateHigh
+        expr: cvg:ai_provider_error_ratio:rate5m > 0.05
+        for: 10m
+        labels: { severity: warning, owner: ai }
+        annotations:
+          summary: Combined AI provider error rate is above 5 percent
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgPrivacyOperationFailure
+        expr: sum without(instance, pod, kind) (increase(privacy_operations_errors_total[15m])) > 0
+        for: 0m
+        labels: { severity: critical, owner: privacy }
+        annotations:
+          summary: A privacy operation failed and requires reconciliation
+          runbook: docs/69_data_subject_rights_runbook.md
+
+  - name: cvg-agent-secretary-error-budget
+    rules:
+      - alert: CvgWebhookSloFastBurn
+        expr: cvg:slo_webhook_error_budget_burn:rate1h > 14.4 and cvg:slo_webhook_error_budget_burn:rate6h > 6
+        for: 5m
+        labels: { severity: critical, owner: backend }
+        annotations:
+          summary: Webhook success SLO is consuming error budget rapidly
+          runbook: docs/71_security_operations_and_recovery_runbook.md

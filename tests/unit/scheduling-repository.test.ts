@@ -82,6 +82,7 @@ describe('scheduling repository', () => {
       isActive: true,
     });
     expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO appointment_services'), [
+      '1',
       'Consulta',
       'Consulta clinica',
       30,
@@ -117,12 +118,14 @@ describe('scheduling repository', () => {
     expect(provider.sector).toBeUndefined();
     expect(slot.status).toBe('available');
     expect(mockQuery).toHaveBeenNthCalledWith(1, expect.stringContaining('INSERT INTO appointment_services'), [
+      '1',
       'Banho',
       null,
       30,
       false,
     ]);
     expect(mockQuery).toHaveBeenNthCalledWith(3, expect.stringContaining('INSERT INTO appointment_slots'), [
+      '1',
       null,
       null,
       new Date('2026-06-01T13:00:00.000Z'),
@@ -137,6 +140,7 @@ describe('scheduling repository', () => {
       .mockResolvedValueOnce({
         rows: [{ id: 'provider-1', name: 'Dra Ana', sector: 'clinica', is_active: true }],
       })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [slotRow()] });
 
     const providers = await repository.listProviders();
@@ -165,6 +169,7 @@ describe('scheduling repository', () => {
     expect(mockQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('FROM appointment_slots s'),
       [
+        '1',
         new Date('2026-06-01T00:00:00.000Z'),
         new Date('2026-06-02T00:00:00.000Z'),
         'service-1',
@@ -176,7 +181,9 @@ describe('scheduling repository', () => {
   });
 
   it('checks available slots with service filtering', async () => {
-    mockQuery.mockResolvedValue({ rows: [slotRow()] });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [slotRow()] });
 
     const slots = await repository.checkAvailableSlots({
       from: new Date('2026-06-01T00:00:00.000Z'),
@@ -186,9 +193,16 @@ describe('scheduling repository', () => {
     });
 
     expect(slots).toHaveLength(1);
-    expect(mockQuery).toHaveBeenCalledWith(
-      expect.stringContaining('AND s.service_id = $4'),
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining('WITH expired_reservations AS'),
+      ['1'],
+    );
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('AND s.service_id = $5'),
       [
+        '1',
         new Date('2026-06-01T00:00:00.000Z'),
         new Date('2026-06-02T00:00:00.000Z'),
         5,
@@ -226,12 +240,24 @@ describe('scheduling repository', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({});
 
-    await expect(repository.reserveSlot({ slotId: 'slot-1' }))
+    await expect(repository.reserveSlot({
+      slotId: 'slot-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    }))
       .rejects
       .toThrow('Slot is not available');
 
     expect(mockClient.query).toHaveBeenLastCalledWith('ROLLBACK');
     expect(mockClient.release).toHaveBeenCalledOnce();
+  });
+
+  it('rejects reservations without ownership before opening a transaction', async () => {
+    await expect(repository.reserveSlot({ slotId: 'slot-1' }))
+      .rejects
+      .toThrow('Appointment ownership context is required');
+
+    expect(mockGetClient).not.toHaveBeenCalled();
   });
 
   it('confirms appointments transactionally', async () => {
@@ -243,13 +269,22 @@ describe('scheduling repository', () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({});
 
-    const appointment = await repository.confirmAppointment({ appointmentId: 'appointment-1' });
+    const appointment = await repository.confirmAppointment({
+      appointmentId: 'appointment-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(appointment.status).toBe('confirmed');
     expect(mockClient.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/conversation_id = \$2\s+AND contact_id = \$3/),
+      ['appointment-1', 'conversation-1', 'contact-1', '1']
+    );
+    expect(mockClient.query).toHaveBeenNthCalledWith(
       3,
-      'UPDATE appointment_slots SET status = \'booked\', updated_at = NOW() WHERE id = $1',
-      ['slot-1']
+      'UPDATE appointment_slots SET status = \'booked\', updated_at = NOW() WHERE id = $1 AND tenant_id = $2',
+      ['slot-1', '1']
     );
     expect(mockClient.query).toHaveBeenLastCalledWith('COMMIT');
   });
@@ -266,14 +301,57 @@ describe('scheduling repository', () => {
     const appointment = await repository.cancelAppointment({
       appointmentId: 'appointment-1',
       reason: 'Tutor pediu cancelamento',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
     });
 
     expect(appointment.status).toBe('cancelled');
     expect(mockClient.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/conversation_id = \$3\s+AND contact_id = \$4/),
+      ['appointment-1', 'Tutor pediu cancelamento', 'conversation-1', 'contact-1', '1']
+    );
+    expect(mockClient.query).toHaveBeenNthCalledWith(
       3,
-      'UPDATE appointment_slots SET status = \'available\', updated_at = NOW() WHERE id = $1',
-      ['slot-1']
+      'UPDATE appointment_slots SET status = \'available\', updated_at = NOW() WHERE id = $1 AND tenant_id = $2',
+      ['slot-1', '1']
     );
     expect(mockClient.query).toHaveBeenLastCalledWith('COMMIT');
+  });
+
+  it('rejects appointment mutations without ownership context', async () => {
+    await expect(repository.confirmAppointment({ appointmentId: 'appointment-1' }))
+      .rejects
+      .toThrow('Appointment ownership context is required');
+    await expect(repository.cancelAppointment({ appointmentId: 'appointment-1' }))
+      .rejects
+      .toThrow('Appointment ownership context is required');
+
+    expect(mockGetClient).not.toHaveBeenCalled();
+  });
+
+  it('rolls back the whole reschedule when the new slot is unavailable', async () => {
+    mockClient.query
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ rows: [appointmentRow({ status: 'confirmed' })] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({});
+
+    await expect(repository.rescheduleAppointment({
+      appointmentId: 'appointment-1',
+      slotId: 'slot-2',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+      reason: 'Novo horario',
+    })).rejects.toThrow('Slot is not available');
+
+    expect(mockClient.query).toHaveBeenNthCalledWith(1, 'BEGIN');
+    expect(mockClient.query).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('FOR UPDATE'),
+      ['appointment-1', 'conversation-1', 'contact-1', '1']
+    );
+    expect(mockClient.query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(mockClient.query).not.toHaveBeenCalledWith('COMMIT');
   });
 });

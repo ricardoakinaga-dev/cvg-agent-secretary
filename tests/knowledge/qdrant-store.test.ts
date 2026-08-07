@@ -1,9 +1,10 @@
 import { QdrantHybridStore } from '../../src/modules/knowledge/qdrant-store';
 
-jest.mock('../../src/config', () => ({
+vi.mock('../../src/config', () => ({
     config: {
     qdrant: {
       url: 'http://qdrant:6333',
+      apiKey: '',
       collection: 'cvg_agent_secretary',
       vectorName: 'dense',
       sparseVectorName: 'sparse',
@@ -12,24 +13,27 @@ jest.mock('../../src/config', () => ({
       createCollection: false,
       readOnly: true,
     },
+    chatwoot: {
+      accountId: '1',
+    },
   },
 }));
 
-jest.mock('../../src/modules/logging', () => ({
+vi.mock('../../src/modules/logging', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    child: jest.fn().mockReturnThis(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn().mockReturnThis(),
   },
 }));
 
 describe('QdrantHybridStore', () => {
-  const fetchMock = jest.fn();
+  const fetchMock = vi.fn();
 
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
     global.fetch = fetchMock;
   });
 
@@ -49,6 +53,7 @@ describe('QdrantHybridStore', () => {
               id: 'point-1',
               score: 0.42,
               payload: {
+                tenant_id: '1',
                 chunk_id: 'chunk-1',
                 document_id: 'doc-1',
                 text: 'Horario de atendimento externo',
@@ -84,10 +89,21 @@ describe('QdrantHybridStore', () => {
     expect(body.prefetch[0].using).toBe('sparse');
     expect(body.prefetch[1].using).toBe('dense');
     expect(body.query).toEqual({ fusion: 'rrf' });
-    expect(body.filter).toBeUndefined();
+    expect(body.filter).toEqual({
+      must: [
+        { key: 'tenant_id', match: { value: '1' } },
+        { key: 'category', match: { value: 'faq' } },
+      ],
+      must_not: [{
+        key: 'tags',
+        match: {
+          any: expect.arrayContaining(['internal', 'restrito', 'confidencial']),
+        },
+      }],
+    });
     expect(results[0].chunk.content).toBe('Horario de atendimento externo');
     expect(results[0].chunk.id).toBe('chunk-1');
-    expect(results[0].relevance).toBe(0.7);
+    expect(results[0].relevance).toBe(0.42);
   });
 
   it('falls back to dense search when hybrid search fails', async () => {
@@ -107,6 +123,7 @@ describe('QdrantHybridStore', () => {
               id: 'point-2',
               score: 0.55,
               payload: {
+                tenant_id: '1',
                 chunk_id: 'chunk-2',
                 document_id: 'doc-2',
                 text: 'Consulta clinico geral R$ 89,00',
@@ -134,6 +151,61 @@ describe('QdrantHybridStore', () => {
     expect(fallbackBody.vector.name).toBe('dense');
     expect(fallbackBody.vector.vector).toHaveLength(1536);
     expect(results[0].chunk.content).toBe('Consulta clinico geral R$ 89,00');
+  });
+
+  it('fails closed when Qdrant returns a point from another tenant', async () => {
+    const embedding = Array.from({ length: 1536 }, () => 0.1);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        result: {
+          points: [{
+            id: 'foreign-point',
+            score: 0.99,
+            payload: {
+              tenant_id: '2',
+              chunk_id: 'foreign-chunk',
+              document_id: 'foreign-document',
+              text: 'Conteudo de outro tenant',
+            },
+          }],
+        },
+      }),
+    });
+
+    const store = new QdrantHybridStore();
+    await expect(store.search('consulta', embedding, {
+      limit: 3,
+      minRelevance: 0,
+    })).resolves.toEqual([]);
+  });
+
+  it('does not expose chunks tagged as internal to the public Chatwoot runtime', async () => {
+    const embedding = Array.from({ length: 1536 }, () => 0.1);
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        result: {
+          points: [{
+            id: 'internal-point',
+            score: 0.99,
+            payload: {
+              tenant_id: '1',
+              chunk_id: 'internal-chunk',
+              document_id: 'internal-document',
+              text: 'Diretriz confidencial para colaboradores',
+              tags: ['internal'],
+            },
+          }],
+        },
+      }),
+    });
+
+    const store = new QdrantHybridStore();
+    await expect(store.search('diretriz', embedding, {
+      limit: 3,
+      minRelevance: 0,
+    })).resolves.toEqual([]);
   });
 
   it('rejects invalid dense vector dimensions before calling Qdrant', async () => {

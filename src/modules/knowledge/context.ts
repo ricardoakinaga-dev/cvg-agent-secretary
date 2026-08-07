@@ -9,10 +9,13 @@ const CONSULTATION_PATTERN = /\bconsult(?:a|as|o|ar)\b/i;
 const WALK_IN_SERVICE_PATTERN = /\b(?:ordem de chegada|sem agendamento|nao precisa de agendamento|não precisa de agendamento|nao necessita agendamento|não necessita agendamento|nao e necessario agendar|não é necessário agendar)\b/i;
 const CLINIC_SERVICE_PATTERN = /\b(?:clinica medica|clínica médica|consulta clinica|consulta clínica|clinico geral|clínico geral|atendimento clinico|atendimento clínico)\b/i;
 const SCHEDULING_POLICY_PATTERN = /\b(?:mediante agendamento|com agendamento|agendamento previo|agendamento prévio|agendamento obrigatorio|agendamento obrigatório|com hora marcada|horario marcado|horário marcado)\b/i;
-const SCHEDULING_PROPOSAL_PATTERN = /\b(?:posso|podemos|consigo|vamos|vou)\s+(?:te\s+)?(?:ajudar\s+a\s+)?(?:agendar|marcar|verificar\s+hor[aá]rios?|reservar)|\b(?:me informe|informe|qual)\s+(?:a\s+)?(?:data|dia|hor[aá]rio)|\b(?:agendar|marcar)\s+(?:um\s+)?hor[aá]rio\b/i;
+const SCHEDULING_PROPOSAL_PATTERN = /\b(?:posso|podemos|consigo|vamos|vou)\s+(?:te\s+)?(?:ajudar\s+a\s+)?(?:agendar|marcar|verificar\s+hor[aá]rios?|reservar|iniciar\s+o\s+processo\s+de\s+agendamento)|\b(?:processo\s+de\s+agendamento|me informe|informe|qual)\s+(?:a\s+)?(?:data|dia|hor[aá]rio|de\s+uma\s+consulta)|\b(?:agendar|marcar)\s+(?:um\s+)?hor[aá]rio\b/i;
 const SERVICE_AVAILABILITY_QUERY_PATTERN = /\b(?:tem|t[eê]m|possui|realiza|realizam|faz|fazem|oferece|oferecem)\b/i;
 const SERVICE_TERM_PATTERN = /\b(?:exames?|sangue|raio\s*-?\s*x|rx|ultrass(?:om|onografia)|consulta|cl[ií]nica|atendimento|vacina|cirurgia|internac[aã]o|banho|tosa)\b/i;
 const SCHEDULING_REQUEST_PATTERN = /\b(?:agend|marcar|reservar|hor[aá]rio para|quero para|pode ser)\b/i;
+const CLINICAL_CARE_QUERY_PATTERN = /\b(?:consulta|atendimento|cl[ií]nica\s+m[eé]dica|cl[ií]nico\s+geral|doente|diarreia|diarr[eé]ia|v[oô]mit|febre|tosse|coceira|ferida|apatia|fraco|man[cç]ando|parou\s+de\s+comer|n[aã]o\s+quer\s+comer)\b/i;
+const SPECIALTY_OR_PROCEDURE_QUERY_PATTERN = /\b(?:cardio\w*|cardiolog\w*|dermato\w*|dermatolog\w*|endo\w*|endocrino\w*|oftalmo\w*|ortop\w*|ortopedia\w*|neuro\w*|ultrass\w*|raio\s*-?\s*x|rx|exames?|cirurg\w*|vacina\w*|banho|tosa|internac[aã]o)\b/i;
+const GENERAL_CONSULTATION_EVIDENCE_PATTERN = /\b(?:consulta\s+clinico\s+geral|consulta\s+cl[ií]nico\s+geral|consultas\s+e\s+atendimento|cl[ií]nica\s+m[eé]dica|atendimento\s+cl[ií]nico)\b/i;
 
 const STOP_WORDS = new Set([
   'a', 'ao', 'aos', 'as', 'com', 'da', 'das', 'de', 'do', 'dos', 'e', 'em', 'esta',
@@ -180,6 +183,41 @@ export function buildWalkInServiceResponse(query: string, chunks: KnowledgeChunk
   }
 
   return 'Esse atendimento segue orientação operacional específica do Centro Veterinário Guarapiranga. Vou verificar com um atendente para evitar informação incorreta.';
+}
+
+export function shouldUseClinicalWalkInResponse(
+  query: string,
+  chunks: KnowledgeChunk[],
+  intent?: string
+): boolean {
+  if (hasSchedulingPolicyEvidence(chunks)) {
+    return false;
+  }
+
+  const normalizedQuery = normalize(query);
+  if (SPECIALTY_OR_PROCEDURE_QUERY_PATTERN.test(normalizedQuery)) {
+    return false;
+  }
+
+  const queryLooksLikeGeneralClinicalCare = intent === 'duvida_clinica'
+    || CLINICAL_CARE_QUERY_PATTERN.test(normalizedQuery);
+
+  if (!queryLooksLikeGeneralClinicalCare) {
+    return false;
+  }
+
+  const evidence = normalize(chunks.map((chunk) => chunk.content).join('\n'));
+  return WALK_IN_SERVICE_PATTERN.test(evidence)
+    || GENERAL_CONSULTATION_EVIDENCE_PATTERN.test(evidence)
+    || intent === 'duvida_clinica';
+}
+
+export function buildClinicalWalkInResponse(query: string, chunks: KnowledgeChunk[]): string {
+  if (hasWalkInServiceEvidence(query, chunks)) {
+    return buildWalkInServiceResponse(query, chunks);
+  }
+
+  return 'Entendo sua preocupação. Para avaliação clínica no Centro Veterinário Guarapiranga, o atendimento é por ordem de chegada e não precisa de agendamento. Você pode ir diretamente à unidade para que a equipe avalie o pet. Se houver sinais de emergência, como sangue, apatia intensa, dificuldade para respirar, vômitos contínuos ou piora rápida, procure atendimento imediato.';
 }
 
 export function hasSchedulingPolicyEvidence(chunks: KnowledgeChunk[]): boolean {

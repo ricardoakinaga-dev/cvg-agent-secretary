@@ -3,6 +3,7 @@ const mockSchedulingRepository = vi.hoisted(() => ({
   reserveSlot: vi.fn(),
   confirmAppointment: vi.fn(),
   cancelAppointment: vi.fn(),
+  rescheduleAppointment: vi.fn(),
 }));
 
 vi.mock('../../src/modules/scheduling/repository', () => ({
@@ -57,7 +58,11 @@ describe('scheduling tools', () => {
     const appointment = { id: 'appointment-1', slotId: 'slot-1', status: 'reserved' };
     mockSchedulingRepository.reserveSlot.mockResolvedValue(appointment);
 
-    const result = await reserveSlot({ slotId: 'slot-1', contactId: 'contact-1' });
+    const result = await reserveSlot({
+      slotId: 'slot-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(result.success).toBe(true);
     expect(result.appointment).toBe(appointment);
@@ -67,11 +72,15 @@ describe('scheduling tools', () => {
   it('returns failure when slot reservation fails', async () => {
     mockSchedulingRepository.reserveSlot.mockRejectedValue(new Error('Slot is not available'));
 
-    const result = await reserveSlot({ slotId: 'slot-1' });
+    const result = await reserveSlot({
+      slotId: 'slot-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(result).toEqual({
       success: false,
-      message: 'Slot is not available',
+      message: 'Unable to reserve slot',
     });
   });
 
@@ -79,10 +88,16 @@ describe('scheduling tools', () => {
     const appointment = { id: 'appointment-1', slotId: 'slot-1', status: 'confirmed' };
     mockSchedulingRepository.confirmAppointment.mockResolvedValue(appointment);
 
-    const result = await confirmAppointment({ appointmentId: 'appointment-1' });
+    const result = await confirmAppointment({
+      appointmentId: 'appointment-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(mockSchedulingRepository.confirmAppointment).toHaveBeenCalledWith({
       appointmentId: 'appointment-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
     });
     expect(result.success).toBe(true);
     expect(result.appointment).toBe(appointment);
@@ -93,11 +108,15 @@ describe('scheduling tools', () => {
       new Error('Appointment is not reserved or does not exist')
     );
 
-    const result = await confirmAppointment({ appointmentId: 'appointment-1' });
+    const result = await confirmAppointment({
+      appointmentId: 'appointment-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(result).toEqual({
       success: false,
-      message: 'Appointment is not reserved or does not exist',
+      message: 'Unable to confirm appointment',
     });
   });
 
@@ -105,11 +124,18 @@ describe('scheduling tools', () => {
     const appointment = { id: 'appointment-1', slotId: 'slot-1', status: 'cancelled' };
     mockSchedulingRepository.cancelAppointment.mockResolvedValue(appointment);
 
-    const result = await cancelAppointment({ appointmentId: 'appointment-1', reason: 'Tutor pediu' });
+    const result = await cancelAppointment({
+      appointmentId: 'appointment-1',
+      reason: 'Tutor pediu',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(mockSchedulingRepository.cancelAppointment).toHaveBeenCalledWith({
       appointmentId: 'appointment-1',
       reason: 'Tutor pediu',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
     });
     expect(result).toEqual({
       success: true,
@@ -121,19 +147,21 @@ describe('scheduling tools', () => {
   it('returns failure when cancellation is rejected', async () => {
     mockSchedulingRepository.cancelAppointment.mockRejectedValue(new Error('Appointment cannot be cancelled'));
 
-    const result = await cancelAppointment({ appointmentId: 'appointment-1' });
+    const result = await cancelAppointment({
+      appointmentId: 'appointment-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
 
     expect(result).toEqual({
       success: false,
-      message: 'Appointment cannot be cancelled',
+      message: 'Unable to cancel appointment',
     });
   });
 
-  it('reschedules by cancelling the old appointment and reserving the new slot', async () => {
-    const cancelledAppointment = { id: 'appointment-1', slotId: 'slot-1', status: 'cancelled' };
+  it('reschedules through one repository transaction', async () => {
     const newAppointment = { id: 'appointment-2', slotId: 'slot-2', status: 'reserved' };
-    mockSchedulingRepository.cancelAppointment.mockResolvedValue(cancelledAppointment);
-    mockSchedulingRepository.reserveSlot.mockResolvedValue(newAppointment);
+    mockSchedulingRepository.rescheduleAppointment.mockResolvedValue(newAppointment);
 
     const result = await rescheduleAppointment({
       appointmentId: 'appointment-1',
@@ -143,11 +171,7 @@ describe('scheduling tools', () => {
       reason: 'Tutor pediu novo horario',
     });
 
-    expect(mockSchedulingRepository.cancelAppointment).toHaveBeenCalledWith({
-      appointmentId: 'appointment-1',
-      reason: 'Tutor pediu novo horario',
-    });
-    expect(mockSchedulingRepository.reserveSlot).toHaveBeenCalledWith({
+    expect(mockSchedulingRepository.rescheduleAppointment).toHaveBeenCalledWith({
       appointmentId: 'appointment-1',
       slotId: 'slot-2',
       conversationId: 'conversation-1',
@@ -157,23 +181,50 @@ describe('scheduling tools', () => {
     expect(result).toEqual({
       success: true,
       appointment: newAppointment,
-      message: 'Slot reserved temporarily',
+      message: 'Appointment rescheduled',
     });
+    expect(mockSchedulingRepository.cancelAppointment).not.toHaveBeenCalled();
+    expect(mockSchedulingRepository.reserveSlot).not.toHaveBeenCalled();
   });
 
-  it('does not reserve a new slot when reschedule cancellation fails', async () => {
-    mockSchedulingRepository.cancelAppointment.mockRejectedValue(new Error('Appointment cannot be cancelled'));
+  it('returns failure when the transactional reschedule is rejected', async () => {
+    mockSchedulingRepository.rescheduleAppointment.mockRejectedValue(new Error('Slot is not available'));
 
     const result = await rescheduleAppointment({
       appointmentId: 'appointment-1',
       slotId: 'slot-2',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
+
+    expect(result).toEqual({
+      success: false,
+      message: 'Unable to reschedule appointment',
+    });
+  });
+
+  it('rejects all scheduling mutations without ownership context', async () => {
+    await expect(reserveSlot({ slotId: 'slot-1' })).resolves.toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
+    });
+    await expect(confirmAppointment({ appointmentId: 'appointment-1' })).resolves.toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
+    });
+    await expect(cancelAppointment({ appointmentId: 'appointment-1' })).resolves.toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
+    });
+    await expect(rescheduleAppointment({ appointmentId: 'appointment-1', slotId: 'slot-2' })).resolves.toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
     });
 
     expect(mockSchedulingRepository.reserveSlot).not.toHaveBeenCalled();
-    expect(result).toEqual({
-      success: false,
-      message: 'Appointment cannot be cancelled',
-    });
+    expect(mockSchedulingRepository.confirmAppointment).not.toHaveBeenCalled();
+    expect(mockSchedulingRepository.cancelAppointment).not.toHaveBeenCalled();
+    expect(mockSchedulingRepository.rescheduleAppointment).not.toHaveBeenCalled();
   });
 
   it('exports the scheduling tool registry names used by the agent', () => {

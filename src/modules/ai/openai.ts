@@ -1,7 +1,7 @@
 import { AIProvider, GenerateInput, GenerateOutput } from './types';
 import { openaiClient } from '../openai/client';
 
-export class OpenAIProvider implements AIProvider {
+class OpenAIProvider implements AIProvider {
   name = 'openai';
 
   async generate(input: GenerateInput): Promise<GenerateOutput> {

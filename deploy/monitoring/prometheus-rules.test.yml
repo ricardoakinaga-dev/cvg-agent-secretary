@@ -1,0 +1,100 @@
+rule_files:
+  - prometheus-recording-rules.yml
+  - prometheus-slo-rules.yml
+  - prometheus-alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: critical operational signals fire their owned alerts
+    interval: 1m
+    input_series:
+      - series: 'cvg:webhook_queue_oldest_age_seconds:max{environment="test"}'
+        values: '45x20'
+      - series: 'cvg:webhook_dlq_increase:5m{environment="test"}'
+        values: '1x20'
+      - series: 'cvg:webhook_processing_error_ratio:rate5m{environment="test"}'
+        values: '0.10x20'
+      - series: 'cvg:response_duration_seconds:p95_5m{environment="test"}'
+        values: '12x20'
+      - series: 'cvg:handoff_ratio:rate15m{environment="test"}'
+        values: '0.40x20'
+      - series: 'cvg:dependency_up:min{environment="test",dependency="postgres"}'
+        values: '0x20'
+      - series: 'cvg:slo_webhook_error_budget_burn:rate1h{environment="test"}'
+        values: '20x20'
+      - series: 'cvg:slo_webhook_error_budget_burn:rate6h{environment="test"}'
+        values: '10x20'
+
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: CvgWebhookDeadLettered
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: critical
+              owner: backend
+            exp_annotations:
+              summary: A Chatwoot webhook reached the dead-letter queue
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 11m
+        alertname: CvgWebhookQueueAgeHigh
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: warning
+              owner: platform
+            exp_annotations:
+              summary: Oldest actionable webhook has waited more than 30 seconds
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 11m
+        alertname: CvgWebhookProcessingErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: critical
+              owner: backend
+            exp_annotations:
+              summary: Webhook processing error rate is above 5 percent
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 11m
+        alertname: CvgResponseLatencyHigh
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: warning
+              owner: backend
+            exp_annotations:
+              summary: End-to-end response p95 is above 10 seconds
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 16m
+        alertname: CvgHandoffRateHigh
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: warning
+              owner: operations
+            exp_annotations:
+              summary: Human handoff ratio is above 30 percent
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 4m
+        alertname: CvgDependencyUnavailable
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              dependency: postgres
+              severity: critical
+              owner: platform
+            exp_annotations:
+              summary: A required application dependency is unavailable
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 6m
+        alertname: CvgWebhookSloFastBurn
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: critical
+              owner: backend
+            exp_annotations:
+              summary: Webhook success SLO is consuming error budget rapidly
+              runbook: docs/71_security_operations_and_recovery_runbook.md

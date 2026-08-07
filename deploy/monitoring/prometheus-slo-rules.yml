@@ -1,0 +1,31 @@
+groups:
+  - name: cvg-agent-secretary-slos
+    interval: 30s
+    rules:
+      # Initial production objectives. Re-baseline only through an approved
+      # operational change; never tune a threshold merely to silence an alert.
+      - record: cvg:slo_webhook_success_ratio:rate30d
+        expr: 1 - (sum without(instance, pod, outcome) (increase(webhook_processing_total{outcome=~"dead_letter|expired"}[30d])) / clamp_min(sum without(instance, pod, outcome) (increase(webhook_processing_total{outcome=~"success|dead_letter|expired"}[30d])), 1))
+        labels:
+          objective: "0.999"
+          owner: backend
+      - record: cvg:slo_webhook_error_budget_burn:rate1h
+        expr: (sum without(instance, pod, outcome) (increase(webhook_processing_total{outcome=~"dead_letter|expired"}[1h])) / clamp_min(sum without(instance, pod, outcome) (increase(webhook_processing_total{outcome=~"success|dead_letter|expired"}[1h])), 1)) / 0.001
+        labels:
+          objective: "0.999"
+          owner: backend
+      - record: cvg:slo_webhook_error_budget_burn:rate6h
+        expr: (sum without(instance, pod, outcome) (increase(webhook_processing_total{outcome=~"dead_letter|expired"}[6h])) / clamp_min(sum without(instance, pod, outcome) (increase(webhook_processing_total{outcome=~"success|dead_letter|expired"}[6h])), 1)) / 0.001
+        labels:
+          objective: "0.999"
+          owner: backend
+      - record: cvg:slo_response_latency_compliance:rate30d
+        expr: sum without(instance, pod) (increase(analytics_response_duration_seconds_bucket{le="10"}[30d])) / clamp_min(sum without(instance, pod) (increase(analytics_response_duration_seconds_count[30d])), 1)
+        labels:
+          objective: "0.95"
+          owner: backend
+      - record: cvg:slo_queue_age_compliance:rate30d
+        expr: sum without(instance, pod) (increase(webhook_queue_age_seconds_bucket{le="30"}[30d])) / clamp_min(sum without(instance, pod) (increase(webhook_queue_age_seconds_count[30d])), 1)
+        labels:
+          objective: "0.99"
+          owner: platform

@@ -1,8 +1,40 @@
 services:
   # Redis for caching and state
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     restart: unless-stopped
+    environment:
+      REDIS_USERNAME: ${REDIS_USERNAME:?REDIS_USERNAME is required}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --user
+      - default
+      - reset
+      - "on"
+      - ">${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+      - "~cvg:*"
+      - "+@read"
+      - "+@write"
+      # Redis replays Lua write effects from AOF inside SELECT/MULTI/EXEC as
+      # the default user. Keep this password-protected loader identity scoped
+      # to application keys and only the commands required for durable replay.
+      - "+select"
+      - "+multi"
+      - "+exec"
+      - --user
+      - ${REDIS_USERNAME:?REDIS_USERNAME is required}
+      - "on"
+      - ">${REDIS_PASSWORD:?REDIS_PASSWORD is required}"
+      - "~cvg:*"
+      - "+@read"
+      - "+@write"
+      - "+eval"
+      - "+ping"
+      - "+quit"
+      - "+info"
     expose:
       - "6379"
     networks:
@@ -12,19 +44,21 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli --user $$REDIS_USERNAME --pass $$REDIS_PASSWORD --no-auth-warning ping"]
       interval: 10s
       timeout: 3s
       retries: 3
 
   # PostgreSQL for persistent storage
   postgres:
-    image: pgvector/pgvector:pg15
+    image: pgvector/pgvector:pg15@sha256:a20a57d7aa5217a6af0a391ccf69f4a8512406d6c14be08132f801468cc3cc62
     restart: unless-stopped
     environment:
-      POSTGRES_DB: cvg_agent
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
+      POSTGRES_USER: ${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}
+      POSTGRES_APP_USER: ${POSTGRES_APP_USER:?POSTGRES_APP_USER is required}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}
     expose:
       - "5432"
     networks:
@@ -33,20 +67,38 @@ services:
           - agent-secretary-postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+      - ./database/init/00_create_app_role.sh:/docker-entrypoint-initdb.d/00_create_app_role.sh:ro
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/10_schema.sql:ro
+      - ./database/init/20_grant_app_role.sh:/docker-entrypoint-initdb.d/20_grant_app_role.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 3s
       retries: 3
 
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_APP_USER:?POSTGRES_APP_USER is required}:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}@agent-secretary-postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_ADMIN_USER:?POSTGRES_ADMIN_USER is required}:${POSTGRES_ADMIN_PASSWORD:?POSTGRES_ADMIN_PASSWORD is required}@agent-secretary-postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      CHATWOOT_ACCOUNT_ID: ${CHATWOOT_ACCOUNT_ID}
+      DB_SSL: "false"
+    command: ["node", "dist/scripts/migrate.js"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   # Optional local Qdrant vector store for standalone deployments
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    image: qdrant/qdrant:v1.12.4@sha256:241edb9d7778327516ef218f8c74e1bd61b5ea42cd4f193cb8d0896199705636
+    profiles: ["standalone-qdrant"]
     restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "127.0.0.1:${QDRANT_HOST_PORT:-6333}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_HOST_PORT:-6334}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
 
@@ -55,14 +107,19 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    init: true
     restart: unless-stopped
     ports:
-      - "3023:3000"
+      - "127.0.0.1:3023:3000"
     environment:
       NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: postgres://postgres:postgres@agent-secretary-postgres:5432/cvg_agent
+      TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+      DATABASE_URL: postgresql://${POSTGRES_APP_USER:?POSTGRES_APP_USER is required}:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD is required}@agent-secretary-postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}
+      ALLOW_INSECURE_PRIVATE_STORES: "true"
       REDIS_URL: redis://agent-secretary-redis:6379
+      REDIS_USERNAME: ${REDIS_USERNAME:?REDIS_USERNAME is required}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       KNOWLEDGE_VECTOR_STORE: qdrant
       QDRANT_URL: ${QDRANT_URL:-http://cvg-master-rag-qdrant:6333}
       QDRANT_API_KEY: ${QDRANT_API_KEY:-}
@@ -73,15 +130,29 @@ services:
       QDRANT_SCORE_THRESHOLD: ${QDRANT_SCORE_THRESHOLD:-0}
       QDRANT_READ_ONLY: "true"
       OPENAI_API_KEY: ${OPENAI_API_KEY}
-      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4.1}
       AI_PROVIDER: ${AI_PROVIDER:-auto}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
       CHATWOOT_API_URL: ${CHATWOOT_API_URL}
       CHATWOOT_API_TOKEN: ${CHATWOOT_API_TOKEN}
       CHATWOOT_ACCOUNT_ID: ${CHATWOOT_ACCOUNT_ID}
+      CHATWOOT_INBOX_IDS: ${CHATWOOT_INBOX_IDS}
       CHATWOOT_WEBHOOK_SECRET: ${CHATWOOT_WEBHOOK_SECRET}
-      API_ADMIN_TOKEN: ${API_ADMIN_TOKEN}
+      API_JWT_PUBLIC_KEY: ${API_JWT_PUBLIC_KEY}
+      API_JWT_ISSUER: ${API_JWT_ISSUER}
+      API_JWT_AUDIENCE: ${API_JWT_AUDIENCE}
+      ALLOW_LEGACY_API_TOKEN: "false"
+      API_ADMIN_TOKEN: ${API_ADMIN_TOKEN:-}
+      PRIVACY_ENABLED: ${PRIVACY_ENABLED:-false}
+      PRIVACY_RETENTION_POLICIES_JSON: ${PRIVACY_RETENTION_POLICIES_JSON:-[]}
+      PRIVACY_RECOVERY_CHECKPOINTS_JSON: ${PRIVACY_RECOVERY_CHECKPOINTS_JSON:-[]}
+      PRIVACY_QDRANT_ATTESTATION_ID: ${PRIVACY_QDRANT_ATTESTATION_ID:-}
+      PRIVACY_LOGS_ATTESTATION_ID: ${PRIVACY_LOGS_ATTESTATION_ID:-}
+      PII_ENCRYPTION_REQUIRED: ${PII_ENCRYPTION_REQUIRED:-false}
+      PII_ACTIVE_KEY_ID: ${PII_ACTIVE_KEY_ID:-}
+      PII_ENCRYPTION_KEYS_JSON: ${PII_ENCRYPTION_KEYS_JSON:-{}}
+      PII_LOOKUP_KEY: ${PII_LOOKUP_KEY:-}
       HANDOFF_TIMEOUT_MINUTES: ${HANDOFF_TIMEOUT_MINUTES:-10}
       LOG_LEVEL: info
     depends_on:
@@ -89,12 +160,12 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
-      qdrant:
-        condition: service_started
+      migrate:
+        condition: service_completed_successfully
     networks:
       - default
       - chatwoot_default
-    command: npm start
+    command: ["node", "dist/server.js"]
 
 volumes:
   redis_data:

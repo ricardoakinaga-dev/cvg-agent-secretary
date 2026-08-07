@@ -26,6 +26,11 @@ vi.mock('../../src/modules/handoff/tools', () => mockHandoff);
 
 import { executeAgentTool, getOpenAITools } from '../../src/modules/agent-tools';
 
+const APPOINTMENT_ID = '22222222-2222-4222-8222-222222222222';
+const SLOT_ID = '11111111-1111-4111-8111-111111111111';
+const NEW_SLOT_ID = '33333333-3333-4333-8333-333333333333';
+const SERVICE_ID = '44444444-4444-4444-8444-444444444444';
+
 describe('agent tool registry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -60,12 +65,17 @@ describe('agent tool registry', () => {
 
     await executeAgentTool(
       'reserve_slot',
-      JSON.stringify({ slotId: 'slot-1', petName: 'Buddy' }),
-      { conversationId: 'conversation-1', contactId: 'contact-1', contactName: 'Maria' }
+      JSON.stringify({ slotId: SLOT_ID, petName: 'Buddy', confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        contactName: 'Maria',
+        userMessage: 'Quero reservar esse horario',
+      }
     );
 
     expect(mockScheduling.reserveSlot).toHaveBeenCalledWith({
-      slotId: 'slot-1',
+      slotId: SLOT_ID,
       serviceId: undefined,
       conversationId: 'conversation-1',
       contactId: 'contact-1',
@@ -86,8 +96,7 @@ describe('agent tool registry', () => {
 
     expect(result).toEqual({
       success: false,
-      slots: [],
-      message: 'from and to must be valid ISO dates',
+      message: 'Invalid tool arguments',
     });
     expect(mockScheduling.checkAvailableSlots).not.toHaveBeenCalled();
   });
@@ -98,7 +107,7 @@ describe('agent tool registry', () => {
     const result = await executeAgentTool(
       'check_available_slots',
       JSON.stringify({
-        serviceId: 'service-1',
+        serviceId: SERVICE_ID,
         from: '2026-06-01T09:00:00.000Z',
         to: '2026-06-01T18:00:00.000Z',
         limit: 4,
@@ -107,7 +116,7 @@ describe('agent tool registry', () => {
     );
 
     expect(mockScheduling.checkAvailableSlots).toHaveBeenCalledWith({
-      serviceId: 'service-1',
+      serviceId: SERVICE_ID,
       from: new Date('2026-06-01T09:00:00.000Z'),
       to: new Date('2026-06-01T18:00:00.000Z'),
       limit: 4,
@@ -119,25 +128,30 @@ describe('agent tool registry', () => {
     mockScheduling.reserveSlot.mockResolvedValue({
       success: true,
       appointment: {
-        id: 'appointment-1',
-        slotId: 'slot-1',
-        serviceId: 'service-1',
+        id: APPOINTMENT_ID,
+        slotId: SLOT_ID,
+        serviceId: SERVICE_ID,
         petName: 'Buddy',
       },
     });
 
     await executeAgentTool(
       'reserve_slot',
-      JSON.stringify({ slotId: 'slot-1', serviceId: 'service-1' }),
-      { conversationId: 'conversation-1', contactId: 'contact-1' }
+      JSON.stringify({ slotId: SLOT_ID, serviceId: SERVICE_ID, confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Pode reservar esse horario',
+      }
     );
 
     expect(mockSchedulingState.setSchedulingState).toHaveBeenCalledWith('conversation-1', {
       stage: 'waiting_slot_confirmation',
-      appointmentId: 'appointment-1',
-      slotId: 'slot-1',
-      serviceId: 'service-1',
+      appointmentId: APPOINTMENT_ID,
+      slotId: SLOT_ID,
+      serviceId: SERVICE_ID,
       petName: 'Buddy',
+      contactId: 'contact-1',
       lastIntent: 'agendamento',
     });
   });
@@ -147,8 +161,12 @@ describe('agent tool registry', () => {
 
     await executeAgentTool(
       'reserve_slot',
-      JSON.stringify({ slotId: 'slot-1' }),
-      { conversationId: 'conversation-1' }
+      JSON.stringify({ slotId: SLOT_ID, confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Quero reservar',
+      }
     );
 
     expect(mockSchedulingState.setSchedulingState).not.toHaveBeenCalled();
@@ -158,26 +176,35 @@ describe('agent tool registry', () => {
     mockScheduling.confirmAppointment.mockResolvedValue({
       success: true,
       appointment: {
-        id: 'appointment-1',
-        slotId: 'slot-1',
-        serviceId: 'service-1',
+        id: APPOINTMENT_ID,
+        slotId: SLOT_ID,
+        serviceId: SERVICE_ID,
         petName: 'Buddy',
       },
     });
 
     const result = await executeAgentTool(
       'confirm_appointment',
-      JSON.stringify({ appointmentId: 'appointment-1' }),
-      { conversationId: 'conversation-1' }
+      JSON.stringify({ appointmentId: APPOINTMENT_ID, confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Sim, pode confirmar',
+      }
     );
 
-    expect(mockScheduling.confirmAppointment).toHaveBeenCalledWith({ appointmentId: 'appointment-1' });
+    expect(mockScheduling.confirmAppointment).toHaveBeenCalledWith({
+      appointmentId: APPOINTMENT_ID,
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
     expect(mockSchedulingState.setSchedulingState).toHaveBeenCalledWith('conversation-1', {
       stage: 'confirmed',
-      appointmentId: 'appointment-1',
-      slotId: 'slot-1',
-      serviceId: 'service-1',
+      appointmentId: APPOINTMENT_ID,
+      slotId: SLOT_ID,
+      serviceId: SERVICE_ID,
       petName: 'Buddy',
+      contactId: 'contact-1',
       lastIntent: 'agendamento',
     });
     expect(result).toMatchObject({ success: true });
@@ -187,8 +214,8 @@ describe('agent tool registry', () => {
     mockScheduling.cancelAppointment.mockResolvedValue({
       success: true,
       appointment: {
-        id: 'appointment-1',
-        slotId: 'slot-1',
+        id: APPOINTMENT_ID,
+        slotId: SLOT_ID,
         serviceId: null,
         petName: 'Buddy',
       },
@@ -196,20 +223,27 @@ describe('agent tool registry', () => {
 
     await executeAgentTool(
       'cancel_appointment',
-      JSON.stringify({ appointmentId: 'appointment-1', reason: 'Tutor pediu' }),
-      { conversationId: 'conversation-1' }
+      JSON.stringify({ appointmentId: APPOINTMENT_ID, reason: 'Tutor pediu', confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Quero cancelar',
+      }
     );
 
     expect(mockScheduling.cancelAppointment).toHaveBeenCalledWith({
-      appointmentId: 'appointment-1',
+      appointmentId: APPOINTMENT_ID,
       reason: 'Tutor pediu',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
     });
     expect(mockSchedulingState.setSchedulingState).toHaveBeenCalledWith('conversation-1', {
       stage: 'cancelled',
-      appointmentId: 'appointment-1',
-      slotId: 'slot-1',
+      appointmentId: APPOINTMENT_ID,
+      slotId: SLOT_ID,
       serviceId: undefined,
       petName: 'Buddy',
+      contactId: 'contact-1',
       lastIntent: 'cancelamento',
     });
   });
@@ -219,17 +253,55 @@ describe('agent tool registry', () => {
 
     await executeAgentTool(
       'reschedule_appointment',
-      JSON.stringify({ appointmentId: 'appointment-1', slotId: 'slot-2', reason: 'Novo horario' }),
-      { conversationId: 'conversation-1', contactId: 'contact-1' }
+      JSON.stringify({ appointmentId: APPOINTMENT_ID, slotId: NEW_SLOT_ID, reason: 'Novo horario', confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Quero remarcar',
+      }
     );
 
     expect(mockScheduling.rescheduleAppointment).toHaveBeenCalledWith({
-      appointmentId: 'appointment-1',
-      slotId: 'slot-2',
+      appointmentId: APPOINTMENT_ID,
+      slotId: NEW_SLOT_ID,
       conversationId: 'conversation-1',
       contactId: 'contact-1',
       reason: 'Novo horario',
     });
+  });
+
+  it('rejects appointment mutations when tool ownership context is incomplete', async () => {
+    const confirmResult = await executeAgentTool(
+      'confirm_appointment',
+      JSON.stringify({ appointmentId: APPOINTMENT_ID, confirmed: true }),
+      { conversationId: 'conversation-1' }
+    );
+    const cancelResult = await executeAgentTool(
+      'cancel_appointment',
+      JSON.stringify({ appointmentId: APPOINTMENT_ID, confirmed: true }),
+      { contactId: 'contact-1' }
+    );
+    const rescheduleResult = await executeAgentTool(
+      'reschedule_appointment',
+      JSON.stringify({ appointmentId: APPOINTMENT_ID, slotId: NEW_SLOT_ID, confirmed: true }),
+      {}
+    );
+
+    expect(confirmResult).toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
+    });
+    expect(cancelResult).toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
+    });
+    expect(rescheduleResult).toEqual({
+      success: false,
+      message: 'Appointment ownership context is required',
+    });
+    expect(mockScheduling.confirmAppointment).not.toHaveBeenCalled();
+    expect(mockScheduling.cancelAppointment).not.toHaveBeenCalled();
+    expect(mockScheduling.rescheduleAppointment).not.toHaveBeenCalled();
   });
 
   it('creates handoff records with context and pending questions', async () => {
@@ -241,12 +313,16 @@ describe('agent tool registry', () => {
         triggerType: 'clinical_risk',
         triggerReason: 'Tutor descreveu emergencia',
         summary: 'Possivel urgencia',
-        pendingQuestions: ['Quanto tempo?', 123, 'Tem sangramento?'],
+        pendingQuestions: ['Quanto tempo?', 'Tem sangramento?'],
         whatWasAnswered: 'Orientacao de procurar atendimento',
         whatIsMissing: 'Triagem humana',
         riskLevel: 'high',
       }),
-      { conversationId: 'conversation-1', contactId: 'contact-1' }
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Quero falar com um atendente',
+      }
     );
 
     expect(mockHandoff.createHandoff).toHaveBeenCalledWith({
@@ -262,22 +338,12 @@ describe('agent tool registry', () => {
     });
   });
 
-  it('uses safe defaults when creating handoff without context', async () => {
-    mockHandoff.createHandoff.mockResolvedValue({ success: true });
-
-    await executeAgentTool('create_handoff', '{}', {});
-
-    expect(mockHandoff.createHandoff).toHaveBeenCalledWith({
-      conversationId: 'unknown',
-      contactId: undefined,
-      triggerType: 'agent_tool',
-      triggerReason: 'handoff requested',
-      summary: undefined,
-      pendingQuestions: undefined,
-      whatWasAnswered: undefined,
-      whatIsMissing: undefined,
-      riskLevel: undefined,
+  it('rejects handoff creation without its required reason fields', async () => {
+    await expect(executeAgentTool('create_handoff', '{}', {})).resolves.toEqual({
+      success: false,
+      message: 'Invalid tool arguments',
     });
+    expect(mockHandoff.createHandoff).not.toHaveBeenCalled();
   });
 
   it('notifies sectors with context', async () => {
@@ -285,8 +351,12 @@ describe('agent tool registry', () => {
 
     await executeAgentTool(
       'notify_sector',
-      JSON.stringify({ sector: 'recepcao', message: 'Confirmar agenda', priority: 'high' }),
-      { conversationId: 'conversation-1', contactId: 'contact-1' }
+      JSON.stringify({ sector: 'recepcao', message: 'Confirmar agenda', priority: 'high', confirmed: true }),
+      {
+        conversationId: 'conversation-1',
+        contactId: 'contact-1',
+        userMessage: 'Quero falar com a recepcao',
+      }
     );
 
     expect(mockHandoff.notifySector).toHaveBeenCalledWith({
@@ -303,13 +373,13 @@ describe('agent tool registry', () => {
 
     const result = await executeAgentTool(
       'notify_sector',
-      JSON.stringify({ sector: 'recepcao', message: 'Avisar humano' }),
-      {}
+      JSON.stringify({ sector: 'recepcao', message: 'Avisar humano', confirmed: true }),
+      { userMessage: 'Quero falar com um atendente' }
     );
 
     expect(result).toEqual({
       success: false,
-      message: 'network unavailable',
+      message: 'Tool execution failed',
     });
   });
 

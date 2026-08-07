@@ -2,6 +2,8 @@
 // Phase 6: Persistent Analytics
 
 import { query } from '../../shared/db';
+import { config } from '../../config';
+import { clampInteger } from '../../shared/numbers';
 import {
   AnalyticsEvent,
   AnalyticsEventInput,
@@ -13,13 +15,14 @@ class AnalyticsRepository {
   async createEvent(input: AnalyticsEventInput): Promise<AnalyticsEvent> {
     const sql = `
       INSERT INTO analytics_events (
-        event_type, conversation_id, contact_id, provider, 
+        tenant_id, event_type, conversation_id, contact_id, provider,
         latency, outcome, metadata, timestamp
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
     `;
 
     const result = await query(sql, [
+      config.chatwoot.accountId,
       input.eventType,
       input.conversationId || null,
       input.contactId || null,
@@ -39,9 +42,9 @@ class AnalyticsRepository {
     since?: Date;
     limit?: number;
   }): Promise<AnalyticsEvent[]> {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    let paramIndex = 1;
+    const conditions: string[] = ['tenant_id = $1'];
+    const params: unknown[] = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     if (filters?.eventType) {
       conditions.push(`event_type = $${paramIndex++}`);
@@ -59,13 +62,15 @@ class AnalyticsRepository {
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-    const limitClause = filters?.limit ? `LIMIT ${filters.limit}` : 'LIMIT 1000';
+    const limit = clampInteger(filters?.limit, 1000, 1, 5000);
+    const limitParameter = `$${paramIndex}`;
+    params.push(limit);
 
     const sql = `
       SELECT * FROM analytics_events
       ${whereClause}
       ORDER BY timestamp DESC
-      ${limitClause}
+      LIMIT ${limitParameter}
     `;
 
     const result = await query(sql, params);
@@ -81,8 +86,8 @@ class AnalyticsRepository {
     errors: number;
     avgResponseLatency: number;
   }> {
-    const sinceClause = since ? `WHERE timestamp >= $1` : '';
-    const params = since ? [since] : [];
+    const sinceClause = since ? 'AND timestamp >= $2' : '';
+    const params = since ? [config.chatwoot.accountId, since] : [config.chatwoot.accountId];
 
     const sql = `
       SELECT 
@@ -94,6 +99,7 @@ class AnalyticsRepository {
         COUNT(*) FILTER (WHERE event_type = 'error_occurred') as errors,
         COALESCE(AVG(latency) FILTER (WHERE event_type = 'response_sent' AND latency IS NOT NULL), 0) as avg_latency
       FROM analytics_events
+      WHERE tenant_id = $1
       ${sinceClause}
     `;
 
@@ -112,7 +118,7 @@ class AnalyticsRepository {
   }
 
   async clearEvents(): Promise<void> {
-    await query('DELETE FROM analytics_events');
+    await query('DELETE FROM analytics_events WHERE tenant_id = $1', [config.chatwoot.accountId]);
   }
 
   private mapRowToEvent(row: Record<string, unknown>): AnalyticsEvent {

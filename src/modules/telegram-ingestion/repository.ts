@@ -2,6 +2,7 @@
 // Phase 5: Database operations for telegram_ingestions and operational_rules
 
 import { query } from '../../shared/db';
+import { config } from '../../config';
 import {
   TelegramIngestion,
   CreateTelegramIngestionInput,
@@ -22,6 +23,7 @@ class TelegramIngestionRepository {
   async create(input: CreateTelegramIngestionInput): Promise<TelegramIngestion> {
     const sql = `
       INSERT INTO telegram_ingestions (
+        tenant_id,
         telegram_chat_id,
         telegram_message_id,
         source,
@@ -31,11 +33,12 @@ class TelegramIngestionRepository {
         content_length,
         tags,
         metadata
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
     `;
 
     const result = await query(sql, [
+      config.chatwoot.accountId,
       input.telegramChatId || null,
       input.telegramMessageId || null,
       input.source || 'telegram',
@@ -65,19 +68,20 @@ class TelegramIngestionRepository {
   ): Promise<TelegramIngestion> {
     const sql = `
       UPDATE telegram_ingestions
-      SET classified_type = $2,
-          classification_confidence = $3,
-          title = $4,
-          tags = $5,
-          destination = $6,
-          target_table = $7,
-          status = $8,
+      SET classified_type = $3,
+          classification_confidence = $4,
+          title = $5,
+          tags = $6,
+          destination = $7,
+          target_table = $8,
+          status = $9,
           updated_at = NOW()
-      WHERE id = $9
+      WHERE tenant_id = $1 AND id = $2
       RETURNING *
     `;
 
     const result = await query(sql, [
+      config.chatwoot.accountId,
       id,
       classifiedType,
       confidence,
@@ -86,7 +90,6 @@ class TelegramIngestionRepository {
       destination,
       targetTable,
       status,
-      id,
     ]);
 
     if (result.rows.length === 0) {
@@ -106,9 +109,9 @@ class TelegramIngestionRepository {
     knowledgeDocumentId?: string,
     validationErrors?: string[]
   ): Promise<TelegramIngestion> {
-    const updates: string[] = ['status = $2', 'updated_at = NOW()'];
-    const values: unknown[] = [id, status];
-    let paramIndex = 3;
+    const updates: string[] = ['status = $3', 'updated_at = NOW()'];
+    const values: unknown[] = [config.chatwoot.accountId, id, status];
+    let paramIndex = 4;
 
     if (processedBy) {
       updates.push(`processed_by = $${paramIndex++}`);
@@ -129,7 +132,7 @@ class TelegramIngestionRepository {
     const sql = `
       UPDATE telegram_ingestions
       SET ${updates.join(', ')}
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
       RETURNING *
     `;
 
@@ -149,14 +152,14 @@ class TelegramIngestionRepository {
     const sql = `
       UPDATE telegram_ingestions
       SET status = 'approved',
-          approved_by = $2,
+          approved_by = $3,
           approved_at = NOW(),
           updated_at = NOW()
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
       RETURNING *
     `;
 
-    const result = await query(sql, [id, approvedBy]);
+    const result = await query(sql, [config.chatwoot.accountId, id, approvedBy]);
 
     if (result.rows.length === 0) {
       throw new Error(`Ingestion not found: ${id}`);
@@ -172,13 +175,13 @@ class TelegramIngestionRepository {
     const sql = `
       UPDATE telegram_ingestions
       SET status = 'rejected',
-          rejection_reason = $3,
+          rejection_reason = $4,
           updated_at = NOW()
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
       RETURNING *
     `;
 
-    const result = await query(sql, [id, rejectedBy, reason]);
+    const result = await query(sql, [config.chatwoot.accountId, id, rejectedBy, reason]);
 
     if (result.rows.length === 0) {
       throw new Error(`Ingestion not found: ${id}`);
@@ -191,8 +194,8 @@ class TelegramIngestionRepository {
    * Get ingestion by ID
    */
   async getById(id: string): Promise<TelegramIngestion | null> {
-    const sql = 'SELECT * FROM telegram_ingestions WHERE id = $1';
-    const result = await query(sql, [id]);
+    const sql = 'SELECT * FROM telegram_ingestions WHERE tenant_id = $1 AND id = $2';
+    const result = await query(sql, [config.chatwoot.accountId, id]);
 
     if (result.rows.length === 0) {
       return null;
@@ -207,11 +210,11 @@ class TelegramIngestionRepository {
   async getByStatus(status: IngestionStatus, limit = 100): Promise<TelegramIngestion[]> {
     const sql = `
       SELECT * FROM telegram_ingestions
-      WHERE status = $1
+      WHERE tenant_id = $1 AND status = $2
       ORDER BY created_at DESC
-      LIMIT $2
+      LIMIT $3
     `;
-    const result = await query(sql, [status, limit]);
+    const result = await query(sql, [config.chatwoot.accountId, status, limit]);
     return result.rows.map(this.mapRowToIngestion);
   }
 
@@ -221,11 +224,11 @@ class TelegramIngestionRepository {
   async getBySource(source: string, limit = 100): Promise<TelegramIngestion[]> {
     const sql = `
       SELECT * FROM telegram_ingestions
-      WHERE source = $1
+      WHERE tenant_id = $1 AND source = $2
       ORDER BY created_at DESC
-      LIMIT $2
+      LIMIT $3
     `;
-    const result = await query(sql, [source, limit]);
+    const result = await query(sql, [config.chatwoot.accountId, source, limit]);
     return result.rows.map(this.mapRowToIngestion);
   }
 
@@ -235,11 +238,11 @@ class TelegramIngestionRepository {
   async getPendingApproval(limit = 50): Promise<TelegramIngestion[]> {
     const sql = `
       SELECT * FROM telegram_ingestions
-      WHERE status = 'pending'
+      WHERE tenant_id = $1 AND status = 'pending'
       ORDER BY created_at ASC
-      LIMIT $1
+      LIMIT $2
     `;
-    const result = await query(sql, [limit]);
+    const result = await query(sql, [config.chatwoot.accountId, limit]);
     return result.rows.map(this.mapRowToIngestion);
   }
 
@@ -249,10 +252,11 @@ class TelegramIngestionRepository {
   async getRecent(limit = 50): Promise<TelegramIngestion[]> {
     const sql = `
       SELECT * FROM telegram_ingestions
+      WHERE tenant_id = $1
       ORDER BY created_at DESC
-      LIMIT $1
+      LIMIT $2
     `;
-    const result = await query(sql, [limit]);
+    const result = await query(sql, [config.chatwoot.accountId, limit]);
     return result.rows.map(this.mapRowToIngestion);
   }
 
@@ -262,6 +266,7 @@ class TelegramIngestionRepository {
   async createOperationalRule(input: CreateOperationalRuleInput): Promise<OperationalRule> {
     const sql = `
       INSERT INTO operational_rules (
+        tenant_id,
         name,
         description,
         rule_type,
@@ -270,11 +275,12 @@ class TelegramIngestionRepository {
         source_id,
         created_by,
         status
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
     `;
 
     const result = await query(sql, [
+      config.chatwoot.accountId,
       input.name,
       input.description || null,
       input.ruleType,
@@ -292,8 +298,8 @@ class TelegramIngestionRepository {
    * Get operational rule by ID
    */
   async getOperationalRuleById(id: string): Promise<OperationalRule | null> {
-    const sql = 'SELECT * FROM operational_rules WHERE id = $1';
-    const result = await query(sql, [id]);
+    const sql = 'SELECT * FROM operational_rules WHERE tenant_id = $1 AND id = $2';
+    const result = await query(sql, [config.chatwoot.accountId, id]);
 
     if (result.rows.length === 0) {
       return null;
@@ -307,10 +313,10 @@ class TelegramIngestionRepository {
    */
   async getOperationalRulesByType(ruleType: string, activeOnly = true): Promise<OperationalRule[]> {
     const sql = activeOnly
-      ? `SELECT * FROM operational_rules WHERE rule_type = $1 AND is_active = true ORDER BY version DESC`
-      : `SELECT * FROM operational_rules WHERE rule_type = $1 ORDER BY version DESC`;
+      ? `SELECT * FROM operational_rules WHERE tenant_id = $1 AND rule_type = $2 AND is_active = true ORDER BY version DESC`
+      : `SELECT * FROM operational_rules WHERE tenant_id = $1 AND rule_type = $2 ORDER BY version DESC`;
     
-    const result = await query(sql, [ruleType]);
+    const result = await query(sql, [config.chatwoot.accountId, ruleType]);
     return result.rows.map(this.mapRowToOperationalRule);
   }
 
@@ -320,10 +326,10 @@ class TelegramIngestionRepository {
   async getActiveOperationalRules(): Promise<OperationalRule[]> {
     const sql = `
       SELECT * FROM operational_rules
-      WHERE is_active = true AND status = 'active'
+      WHERE tenant_id = $1 AND is_active = true AND status = 'active'
       ORDER BY rule_type, name
     `;
-    const result = await query(sql);
+    const result = await query(sql, [config.chatwoot.accountId]);
     return result.rows.map(this.mapRowToOperationalRule);
   }
 
@@ -334,10 +340,10 @@ class TelegramIngestionRepository {
     const sql = `
       UPDATE operational_rules
       SET status = 'active', updated_at = NOW()
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
       RETURNING *
     `;
-    const result = await query(sql, [id]);
+    const result = await query(sql, [config.chatwoot.accountId, id]);
     
     if (result.rows.length === 0) {
       throw new Error(`Operational rule not found: ${id}`);
@@ -353,10 +359,10 @@ class TelegramIngestionRepository {
     const sql = `
       UPDATE operational_rules
       SET status = 'deprecated', is_active = false, updated_at = NOW()
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
       RETURNING *
     `;
-    const result = await query(sql, [id]);
+    const result = await query(sql, [config.chatwoot.accountId, id]);
     
     if (result.rows.length === 0) {
       throw new Error(`Operational rule not found: ${id}`);
@@ -404,15 +410,15 @@ class TelegramIngestionRepository {
     return {
       id: row.id as string,
       name: row.name as string,
-      description: row.description as string | undefined,
+      description: row.description == null ? undefined : String(row.description),
       ruleType: row.rule_type as string,
       content: row.content as Record<string, unknown>,
       version: row.version as number,
       source: row.source as string,
-      sourceId: row.source_id as string | undefined,
+      sourceId: row.source_id == null ? undefined : String(row.source_id),
       status: row.status as string,
-      effectiveFrom: row.effective_from as Date | undefined,
-      effectiveTo: row.effective_to as Date | undefined,
+      effectiveFrom: row.effective_from == null ? undefined : new Date(row.effective_from as string | Date),
+      effectiveTo: row.effective_to == null ? undefined : new Date(row.effective_to as string | Date),
       createdBy: row.created_by as string | undefined,
       approvedBy: row.approved_by as string | undefined,
       approvedAt: row.approved_at as Date | undefined,

@@ -29,7 +29,7 @@ export interface ChatwootWebhookPayload {
   message?: ChatwootMessage;
   content?: string;
   message_type?: ChatwootMessageType;
-  sender?: ChatwootSender;
+  sender?: ChatwootWebhookSender;
   attachments?: ChatwootAttachment[];
   private?: boolean;
   account?: {
@@ -61,9 +61,10 @@ export interface ChatwootConversation {
 export interface ChatwootContact {
   id: number;
   name: string;
-  email: string;
-  phone_number: string;
-  identifier?: string;
+  email?: string | null;
+  phone?: string | null;
+  phone_number?: string | null;
+  identifier?: string | null;
 }
 
 export interface ChatwootMessage {
@@ -81,6 +82,12 @@ export interface ChatwootSender {
   id: number;
   name: string;
   type: 'contact' | 'agent' | 'bot' | 'user';
+}
+
+export interface ChatwootWebhookSender {
+  id: number;
+  name: string;
+  type?: ChatwootSender['type'];
 }
 
 export interface ChatwootAttachment {
@@ -103,6 +110,21 @@ export interface ConversationContext {
   state: ConversationState;
 }
 
+export type ContactRole = 'tutor' | 'cliente' | 'colaborador' | 'fornecedor' | 'outro';
+
+export interface ContactIntakeState {
+  stage: 'identification' | 'data_collection' | 'ready';
+  contactRole?: ContactRole;
+  contactReason?: string;
+  reasonIntent?: string;
+  petName?: string;
+  petSpecies?: string;
+  sector?: string;
+  organization?: string;
+  unansweredAttempts: number;
+  updatedAt: string;
+}
+
 export interface ConversationMetadata {
   startedAt: Date;
   messageCount: number;
@@ -112,6 +134,7 @@ export interface ConversationMetadata {
   handoffStartedAt?: string;
   handoffUntil?: string;
   handoffReason?: string;
+  contactIntake?: ContactIntakeState;
 }
 
 export type ConversationState = 'new' | 'in_progress' | 'waiting' | 'handoff' | 'completed' | 'failed';

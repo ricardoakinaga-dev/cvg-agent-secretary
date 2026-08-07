@@ -6,7 +6,7 @@ import { telegramIngestionRepository } from './repository';
 import { knowledgeRepository } from '../knowledge/repository';
 import { KnowledgeCategory, KnowledgeSource } from '../knowledge/types';
 import { logger } from '../logging';
-import { auditService } from '../audit/service';
+import { assertAuditPrincipal, AuditPrincipal, auditService } from '../audit/service';
 import {
   TelegramIngestion,
   CreateTelegramIngestionInput,
@@ -257,8 +257,10 @@ class TelegramIngestionService {
    */
   async approveIngestion(
     ingestionId: string,
-    approvedBy: string
+    principal: AuditPrincipal
   ): Promise<IngestionResult> {
+    assertAuditPrincipal(principal);
+    const approvedBy = principal.id;
     try {
       // Get ingestion
       const ingestion = await telegramIngestionRepository.getById(ingestionId);
@@ -276,7 +278,7 @@ class TelegramIngestionService {
       if (ingestion.knowledgeDocumentId) {
         await knowledgeRepository.publishDocument(
           ingestion.knowledgeDocumentId,
-          approvedBy
+          principal
         );
         
         // Update ingestion status to published
@@ -304,11 +306,16 @@ class TelegramIngestionService {
       await auditService.recordEvent({
         eventType: 'ingestion_approved',
         actor: approvedBy,
+        actorRole: principal.role,
+        actorSource: principal.source,
         resourceType: 'ingestion',
         resourceId: ingestionId,
         action: 'approve',
+        correlationId: principal.correlationId,
+        idempotencyKey: `ingestion:${ingestionId}:approve`,
         details: {
           knowledgeDocumentId: ingestion.knowledgeDocumentId,
+          status: 'published',
         },
       });
 
@@ -339,9 +346,11 @@ class TelegramIngestionService {
    */
   async rejectIngestion(
     ingestionId: string,
-    rejectedBy: string,
+    principal: AuditPrincipal,
     reason: string
   ): Promise<IngestionResult> {
+    assertAuditPrincipal(principal);
+    const rejectedBy = principal.id;
     try {
       await telegramIngestionRepository.reject(ingestionId, rejectedBy, reason);
 
@@ -355,12 +364,14 @@ class TelegramIngestionService {
       await auditService.recordEvent({
         eventType: 'ingestion_rejected',
         actor: rejectedBy,
+        actorRole: principal.role,
+        actorSource: principal.source,
         resourceType: 'ingestion',
         resourceId: ingestionId,
         action: 'reject',
-        details: {
-          reason,
-        },
+        correlationId: principal.correlationId,
+        idempotencyKey: `ingestion:${ingestionId}:reject`,
+        details: { status: 'rejected' },
       });
 
       return {

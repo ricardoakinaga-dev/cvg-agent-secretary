@@ -2,9 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [master, develop]
   pull_request:
-    branches: [main, develop]
+    branches: [master, develop]
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -13,11 +16,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '20.19'
           cache: 'npm'
 
       - name: Install dependencies
@@ -36,10 +41,45 @@ jobs:
         run: npm run build
 
       - name: Audit production dependencies
-        run: npm audit --omit=dev
+        run: npm audit --omit=dev --audit-level=low
+
+      - name: Audit all dependencies
+        run: npm audit --audit-level=high
+
+      - name: Generate application SBOM
+        run: npm run --silent sbom > sbom.cdx.json
+
+      - name: Upload application SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: application-sbom
+          path: sbom.cdx.json
+          if-no-files-found: error
 
       - name: Validate Docker Compose config
         run: docker compose --env-file .env.example config
+
+      - name: Validate monitoring and workflow YAML
+        run: >-
+          node -e "const fs=require('fs');const YAML=require('yaml');
+          for(const file of [
+          'deploy/monitoring/prometheus-alerts.yml',
+          'deploy/monitoring/prometheus-recording-rules.yml',
+          'deploy/monitoring/prometheus-scrape.example.yml',
+          'deploy/monitoring/prometheus-slo-rules.yml',
+          'deploy/monitoring/prometheus-rules.test.yml'])
+          YAML.parse(fs.readFileSync(file,'utf8'))"
+
+      - name: Validate Prometheus rules and alert firing tests
+        run: |
+          image='prom/prometheus@sha256:63805ebb8d2b3920190daf1cb14a60871b16fd38bed42b857a3182bc621f4996'
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/deploy/monitoring:/rules:ro" -w /rules "$image" \
+            check rules /rules/prometheus-recording-rules.yml \
+            /rules/prometheus-slo-rules.yml /rules/prometheus-alerts.yml
+          docker run --rm --entrypoint promtool \
+            -v "$PWD/deploy/monitoring:/rules:ro" -w /rules "$image" \
+            test rules /rules/prometheus-rules.test.yml
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v4
@@ -55,6 +95,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -64,11 +106,66 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: cvg-secretary-agent:test
+
+      - name: Generate container image SBOM
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: cvg-secretary-agent:test
+          format: cyclonedx
+          output: image-sbom.cdx.json
+
+      - name: Scan image for high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          image-ref: cvg-secretary-agent:test
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Upload container image SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: container-image-sbom
+          path: image-sbom.cdx.json
+          if-no-files-found: error
+
+  reliability-integration:
+    runs-on: ubuntu-latest
+    needs: build
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.19'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run migration, load, restart, rollback and restore gates
+        run: bash scripts/run-reliability-gate.sh
+
+      - name: Upload measured reliability evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reliability-evidence
+          path: coverage/reliability/*.json
+          if-no-files-found: warn
 
   release-gate:
     runs-on: ubuntu-latest
-    needs: [build, docker]
+    needs: [build, docker, reliability-integration]
     if: github.event_name == 'pull_request'
 
     steps:
@@ -79,6 +176,13 @@ jobs:
           echo "- typecheck"
           echo "- test coverage"
           echo "- build"
-          echo "- production dependency audit"
+          echo "- dependency audits"
+          echo "- application SBOM"
           echo "- docker compose config"
           echo "- docker build"
+          echo "- image vulnerability scan and SBOM"
+          echo "- real Postgres, Redis and Qdrant integration"
+          echo "- migration atomic rollback and concurrent lock"
+          echo "- application health, readiness and graceful shutdown smoke"
+          echo "- queue load, multi-worker concurrency and restart recovery"
+          echo "- measured Postgres, Redis and Qdrant restore/RPO/RTO"

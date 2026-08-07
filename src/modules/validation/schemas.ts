@@ -96,6 +96,47 @@ export const UpdatePetSchema = PetSchema.partial().extend({
 
 export type UpdatePetInput = z.infer<typeof UpdatePetSchema>;
 
+const CHATWOOT_MAX_CONTENT_LENGTH = 10_000;
+const CHATWOOT_MAX_ATTACHMENTS = 10;
+
+const ChatwootContactSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().trim().min(1).max(255),
+  email: z.string().max(320).nullable().optional(),
+  phone: z.string().max(64).nullable().optional(),
+  phone_number: z.string().max(64).nullable().optional(),
+  identifier: z.string().max(255).nullable().optional(),
+}).strip();
+
+const ChatwootSenderSchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string().trim().min(1).max(255),
+  type: z.enum(['contact', 'agent', 'bot', 'user']),
+}).strip();
+
+// Account webhooks emitted by Chatwoot omit `type` on the flat, top-level
+// sender even though nested message payloads include it.
+const ChatwootTopLevelSenderSchema = ChatwootSenderSchema.extend({
+  type: z.enum(['contact', 'agent', 'bot', 'user']).optional(),
+}).strip();
+
+const ChatwootAttachmentSchema = z.object({
+  id: z.number().int().positive(),
+  external_url: z.string().url().max(2048).optional(),
+  file_url: z.string().url().max(2048).optional(),
+  filename: z.string().max(255),
+  content_type: z.string().max(255),
+}).strip();
+
+const ChatwootMessageSchema = z.object({
+  id: z.number().int().positive(),
+  content: z.string().max(CHATWOOT_MAX_CONTENT_LENGTH).optional(),
+  message_type: z.union([z.enum(['incoming', 'outgoing']), z.literal(0), z.literal(1)]),
+  private: z.boolean().optional(),
+  sender: ChatwootSenderSchema,
+  attachments: z.array(ChatwootAttachmentSchema).max(CHATWOOT_MAX_ATTACHMENTS).optional(),
+}).strip();
+
 export const ChatwootWebhookSchema = z.object({
   event: z.enum([
     'message_created',
@@ -105,23 +146,80 @@ export const ChatwootWebhookSchema = z.object({
     'conversation_updated',
   ]),
   conversation: z.object({
-    id: z.number(),
-    uuid: z.string(),
-    account_id: z.number(),
-    inbox_id: z.number(),
-    status: z.string(),
-    contact: z.object({
-      id: z.number(),
-      name: z.string(),
-      email: z.string().optional(),
-      phone: z.string().optional(),
-    }),
-  }),
-  message: z.object({
-    id: z.number(),
-    content: z.string().optional(),
-    message_type: z.number(),
-  }).optional(),
+    id: z.number().int().positive(),
+    uuid: z.string().max(255).optional(),
+    account_id: z.number().int().positive().optional(),
+    inbox_id: z.number().int().positive(),
+    status: z.enum(['open', 'pending', 'resolved', 'closed']),
+    contact: ChatwootContactSchema.optional(),
+    meta: z.object({
+      sender: ChatwootContactSchema.optional(),
+    }).strip().optional(),
+  }).strip(),
+  message: ChatwootMessageSchema.optional(),
+  id: z.number().int().positive().optional(),
+  content: z.string().max(CHATWOOT_MAX_CONTENT_LENGTH).optional(),
+  message_type: z.union([z.enum(['incoming', 'outgoing']), z.literal(0), z.literal(1)]).optional(),
+  private: z.boolean().optional(),
+  sender: ChatwootTopLevelSenderSchema.optional(),
+  attachments: z.array(ChatwootAttachmentSchema).max(CHATWOOT_MAX_ATTACHMENTS).optional(),
+  account: z.object({
+    id: z.number().int().positive(),
+    name: z.string().max(255).optional(),
+  }).strip().optional(),
+}).strip().superRefine((payload, context) => {
+  const conversationAccountId = payload.conversation.account_id;
+  const topLevelAccountId = payload.account?.id;
+  if (conversationAccountId === undefined && topLevelAccountId === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'account is required',
+      path: ['conversation', 'account_id'],
+    });
+  } else if (
+    conversationAccountId !== undefined
+    && topLevelAccountId !== undefined
+    && conversationAccountId !== topLevelAccountId
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'account values must match',
+      path: ['account', 'id'],
+    });
+  }
+
+  const isFlatIncomingMessage = payload.message_type === 'incoming' || payload.message_type === 0;
+  const contact = payload.conversation.contact
+    || payload.conversation.meta?.sender
+    || (
+      payload.sender
+      && (
+        isFlatIncomingMessage
+        || payload.sender.type === 'contact'
+        || payload.sender.type === 'user'
+      )
+        ? payload.sender
+        : undefined
+    );
+  if (!contact) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'contact sender is required',
+      path: ['conversation', 'contact'],
+    });
+  }
+
+  if (
+    ['message_created', 'message_updated'].includes(payload.event)
+    && !payload.message
+    && (payload.id === undefined || payload.message_type === undefined || payload.sender === undefined)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'message event requires message or top-level id/message_type/sender',
+      path: ['message'],
+    });
+  }
 });
 
 export type ChatwootWebhookPayload = z.infer<typeof ChatwootWebhookSchema>;

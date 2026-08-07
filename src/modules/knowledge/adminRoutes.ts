@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { requirePermission } from '../../middleware/auth';
+import { AuditPrincipal, createAuthenticatedAuditPrincipal } from '../audit/service';
 import { logger } from '../logging';
 import { knowledgeRepository } from './repository';
 import { KnowledgeCategory, KnowledgeDocumentStatus } from './types';
@@ -17,7 +18,6 @@ const createDocumentSchema = z.object({
   source: z.enum(['telegram', 'manual', 'imported']).optional(),
   tags: z.array(z.string()).optional(),
   metadata: z.record(z.unknown()).optional(),
-  createdBy: z.string().min(1).optional(),
 });
 
 const updateDocumentSchema = z.object({
@@ -28,13 +28,13 @@ const updateDocumentSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
-const actorSchema = z.object({
-  actor: z.string().min(1).optional(),
-});
-
-const rejectDocumentSchema = actorSchema.extend({
+const rejectDocumentSchema = z.object({
   reason: z.string().min(3).max(1000).optional(),
 });
+
+function getAuthenticatedActor(req: Request): AuditPrincipal {
+  return createAuthenticatedAuditPrincipal(req.user, req.header('x-correlation-id'));
+}
 
 function parseLimit(value: unknown): number {
   const parsed = Number(value || 50);
@@ -69,7 +69,11 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const input = createDocumentSchema.parse(req.body);
-      const document = await knowledgeRepository.createDocument(input);
+      const principal = getAuthenticatedActor(req);
+      const document = await knowledgeRepository.createDocument({
+        ...input,
+        createdBy: principal.id,
+      });
       res.status(201).json({ document });
     } catch (error) {
       logger.error('Knowledge create failed', error as Error);
@@ -115,9 +119,8 @@ router.post(
   requirePermission('knowledge:approve'),
   async (req: Request, res: Response) => {
     try {
-      const input = actorSchema.parse(req.body || {});
-      const approvedBy = z.string().min(1).parse(input.actor || req.user?.id);
-      const document = await knowledgeRepository.approveDocument(req.params.id, approvedBy);
+      const principal = getAuthenticatedActor(req);
+      const document = await knowledgeRepository.approveDocument(req.params.id, principal);
       res.json({ document });
     } catch (error) {
       logger.error('Knowledge approve failed', error as Error, { documentId: req.params.id });
@@ -132,8 +135,8 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       const input = rejectDocumentSchema.parse(req.body || {});
-      const rejectedBy = z.string().min(1).parse(input.actor || req.user?.id);
-      const document = await knowledgeRepository.rejectDocument(req.params.id, rejectedBy, input.reason);
+      const principal = getAuthenticatedActor(req);
+      const document = await knowledgeRepository.rejectDocument(req.params.id, principal, input.reason);
       res.json({ document });
     } catch (error) {
       logger.error('Knowledge reject failed', error as Error, { documentId: req.params.id });
@@ -147,8 +150,8 @@ router.post(
   requirePermission('knowledge:publish'),
   async (req: Request, res: Response) => {
     try {
-      const approvedBy = z.string().min(1).parse(req.body?.approvedBy || req.user?.id);
-      const document = await knowledgeRepository.publishDocument(req.params.id, approvedBy);
+      const principal = getAuthenticatedActor(req);
+      const document = await knowledgeRepository.publishDocument(req.params.id, principal);
       res.json({ document });
     } catch (error) {
       logger.error('Knowledge publish failed', error as Error, { documentId: req.params.id });

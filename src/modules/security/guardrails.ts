@@ -43,6 +43,25 @@ const CLINICAL_BLOCK_PATTERNS: RegExp[] = [
   /(?:tratamento|terapia)\s+(?:recomend|indic|para)/i,
   // Interpretation of exams
   /(?:exame\s+de|resultado\s+do)\s+(?:sangue|urina|raio\s+x|ultrassom)/i,
+  // Diagnostic and medication paraphrases
+  /(?:qual\s+(?:é|e)\s+o\s+diagn[oó]stico|o\s+que\s+(?:ele|ela|meu\s+(?:pet|cachorro|gato))\s+tem)/i,
+  /(?:parece|confirme\s+se\s+(?:é|e))\s+(?:ser\s+)?[a-zá-úç][\wá-úç-]*/i,
+  /(?:parece|parecem).{0,30}(?:doen[cç]a|cinomose|parvovirose|gastrite|infec[cç][aã]o|insufici[eê]ncia)/i,
+  /(?:qual|indique|sugira|diga).{0,40}(?:rem[eé]dio|medica[cç][aã]o|medicar)/i,
+  /(?:dose|dosagem)\s+(?:de|do|da)\s+[a-zá-úç][\wá-úç-]*/i,
+  /(?:vai\s+sobreviver|chances?\s+de\s+sobreviver)/i,
+];
+
+/**
+ * Symptoms that require an immediate human handoff rather than a regular AI reply.
+ */
+const EMERGENCY_PATTERNS: RegExp[] = [
+  /(?:n[aã]o\s+consegue|dificuldade\s+(?:para|de))\s+respirar/i,
+  /(?:l[ií]ngua|gengiva)\s+(?:est[aá]\s+)?(?:roxa|azul)/i,
+  /(?:convulsionando|convuls[aã]o|crise\s+convulsiva)/i,
+  /(?:ingeriu|engoliu|comeu).{0,30}(?:veneno|t[oó]xico|produto\s+qu[ií]mico)/i,
+  /(?:desmaiado|inconsciente|sem\s+responder)/i,
+  /(?:sangramento|hemorragia)\s+(?:intenso|intensa|incontrol[aá]vel)/i,
 ];
 
 /**
@@ -63,6 +82,9 @@ const JAILBREAK_PATTERNS: RegExp[] = [
   /(?:mostre|revele|exiba|cole|imprima)\s+(?:o\s+)?(?:prompt|instru[cç][oõ]es|regras)\s+(?:do\s+)?(?:sistema|desenvolvedor)/i,
   /\b(?:modo\s+desenvolvedor|developer\s+mode|dan\s+mode|jailbreak)\b/i,
   /execute\s+(?:comando|c[oó]digo|script)/i,
+  /ignore\s+(?:todas?\s+)?(?:as\s+)?(?:instru[cç][oõ]es|regras|diretrizes)\s+(?:anteriores|acima)/i,
+  /fa[cç]a\s+de\s+conta\s+que\s+(?:as\s+)?regras\s+n[aã]o\s+existem/i,
+  /\[\s*instru[cç][aã]o\s+da\s+ferramenta\s*\]/i,
 ];
 
 /**
@@ -87,6 +109,15 @@ const DATA_EXFILTRATION_PATTERNS: RegExp[] = [
   /(?:banco\s+de\s+dados|redis|postgres|qdrant|logs?|vari[aá]veis?\s+de\s+ambiente)/i,
 ];
 
+// Output checks must identify an actual disclosure. Reusing request-oriented
+// exfiltration patterns here blocks normal intake phrases such as
+// "informações dos pets".
+const INTERNAL_DISCLOSURE_PATTERNS: RegExp[] = [
+  /(?:meu|o)\s+(?:prompt|instru[cç][oõ]es|regras)\s+(?:do\s+)?(?:sistema|desenvolvedor|internas?)\s*(?:[ée]|:)/i,
+  /(?:api[_\s-]?key|token|senha|secret|segredo)\s*(?:[ée]|:|=)\s*\S+/i,
+  /(?:aqui|abaixo|seguem?|encontrei|acessei).{0,80}(?:dados|informa[cç][oõ]es|lista).{0,40}(?:clientes|contatos|tutores|pacientes|pets|colaboradores|terceiros)/i,
+];
+
 /**
  * Check if message contains clinical content that should be blocked
  */
@@ -103,6 +134,10 @@ function isJailbreakAttempt(message: string): boolean {
 
 function isDataExfiltrationAttempt(message: string): boolean {
   return DATA_EXFILTRATION_PATTERNS.some(pattern => pattern.test(message));
+}
+
+function containsInternalDisclosure(message: string): boolean {
+  return INTERNAL_DISCLOSURE_PATTERNS.some(pattern => pattern.test(message));
 }
 
 /**
@@ -161,6 +196,16 @@ export function checkGuardrails(message: string): GuardrailResult {
     };
   }
 
+  if (EMERGENCY_PATTERNS.some((pattern) => pattern.test(message))) {
+    logger.warn('Clinical emergency detected', { messageLength: message.length });
+    return {
+      allowed: false,
+      reason: 'Possível emergência clínica detectada',
+      fallbackType: 'handoff_needed',
+      action: 'handoff',
+    };
+  }
+
   // Check for sensitive data - just log but don't block
   if (containsSensitiveData(message)) {
     logger.info('Sensitive data detected in message', { 
@@ -171,8 +216,8 @@ export function checkGuardrails(message: string): GuardrailResult {
 
   // Check for clinical content - allow but with guardrails
   if (containsClinicalContent(message)) {
-    logger.info('Clinical content detected, applying guardrails', { 
-      message: message.substring(0, 100) 
+    logger.info('Clinical content detected, applying guardrails', {
+      messageLength: message.length,
     });
     return {
       allowed: true,
@@ -193,14 +238,18 @@ export function checkGuardrails(message: string): GuardrailResult {
  */
 export function checkResponseGuardrails(response: string): GuardrailResult {
   const prohibitedPatterns = [
-    { pattern: /(?:seu\s+pet\s+tem|seu\s+cachorro\s+tem|seu\s+gato\s+tem)\s+\w+/i, type: 'diagnosis' },
+    { pattern: /(?:seu\s+(?:pet|cachorro|gato))\s+(?:tem|est[aá]\s+com|possui)\s+\w+/i, type: 'diagnosis' },
+    { pattern: /(?:tudo\s+indica|os\s+sinais\s+confirmam|certamente)\s+que\s+(?:é|e|se\s+trata\s+de)\s+\w+/i, type: 'diagnosis' },
     { pattern: /(?:recomendo|indic[oa])\s+(?:dar|usar|aplicar|tomar)?\s*(?:remédio|medicamento|tratamento|antibiótico|antibiotico)/i, type: 'prescription' },
+    { pattern: /(?:d[eê]|administre|aplique|ofere[cç]a|use)\s+(?:o\s+|a\s+)?(?:[a-zá-úç][\wá-úç-]*\s+)?\d+(?:[.,]\d+)?\s*(?:mg|ml|comprimidos?)/i, type: 'prescription' },
     { pattern: /(?:vai\s+ficar|vai\s+melhorar)\s+\w+/i, type: 'prognosis' },
+    { pattern: /(?:com\s+certeza|certamente).{0,50}(?:estar[aá]|ficar[aá]|vai\s+estar)\s+(?:curado|curada|bem)/i, type: 'prognosis' },
+    { pattern: /(?:pode\s+(?:aguardar|esperar)|aguarde|espere)\s+(?:at[eé]\s+)?(?:amanh[aã]|mais\s+tarde).{0,80}(?:n[aã]o\s+consiga\s+respirar|convulsion|veneno|desmaiad)/i, type: 'unsafe_emergency_delay' },
   ];
 
   for (const { pattern, type } of prohibitedPatterns) {
     if (pattern.test(response)) {
-      logger.warn('Prohibited content in response', { type, response: response.substring(0, 100) });
+      logger.warn('Prohibited content in response', { type, responseLength: response.length });
       return {
         allowed: false,
         reason: `Resposta contém ${type} prohibited`,
@@ -221,7 +270,7 @@ export function checkResponseGuardrails(response: string): GuardrailResult {
     };
   }
 
-  if (isJailbreakAttempt(response) || isDataExfiltrationAttempt(response)) {
+  if (isJailbreakAttempt(response) || containsInternalDisclosure(response)) {
     logger.warn('Unsafe internal/security content in response blocked', {
       responseLength: response.length,
     });
@@ -332,8 +381,8 @@ export function determineFallbackType(
  * Create a safe clinical response that redirects to professional help
  */
 export function createSafeClinicalResponse(petName?: string): string {
-  const namePart = petName ? ` ${petName}` : '';
-  return `Entendo sua preocupação com${namePart}. Para dar a melhor orientação, preciso avaliá-lo presencialmente. Posso agendar uma consulta para você?`;
+  const subject = petName ? ` com ${petName}` : '';
+  return `Entendo sua preocupação${subject}. Para dar a melhor orientação, é importante uma avaliação presencial. Para clínica médica no Centro Veterinário Guarapiranga, o atendimento é por ordem de chegada e não precisa de agendamento.`;
 }
 
 /**

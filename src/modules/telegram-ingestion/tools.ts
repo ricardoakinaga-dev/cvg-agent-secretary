@@ -2,6 +2,7 @@
 // Phase 5: Tools for ingesting Telegram content
 
 import { logger } from '../logging/index';
+import { assertAuditPrincipal, AuditPrincipal } from '../audit/service';
 import { telegramIngestionService } from './service';
 import { classifierService } from './classifier';
 import { TelegramContentType, IngestionResult, IngestionSource } from './types';
@@ -117,21 +118,22 @@ export async function ingestTelegramContent(
  */
 export async function approveContent(
   ingestionId: string,
-  approvedBy: string
+  principal: AuditPrincipal
 ): Promise<{
   success: boolean;
   message: string;
   knowledgeDocumentId?: string;
 }> {
   try {
+    assertAuditPrincipal(principal);
     logger.info('Tool approve_content called', {
       ingestionId,
-      approvedBy,
+      actor: principal.id,
     });
 
     const result = await telegramIngestionService.approveIngestion(
       ingestionId,
-      approvedBy
+      principal
     );
 
     return {
@@ -157,22 +159,22 @@ export async function approveContent(
  */
 export async function rejectContent(
   ingestionId: string,
-  rejectedBy: string,
+  principal: AuditPrincipal,
   reason: string
 ): Promise<{
   success: boolean;
   message: string;
 }> {
   try {
+    assertAuditPrincipal(principal);
     logger.info('Tool reject_content called', {
       ingestionId,
-      rejectedBy,
-      reason,
+      actor: principal.id,
     });
 
     const result = await telegramIngestionService.rejectIngestion(
       ingestionId,
-      rejectedBy,
+      principal,
       reason
     );
 

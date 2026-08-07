@@ -13,18 +13,28 @@ export interface LogContext {
 class Logger {
   private logger: pino.Logger;
 
-  constructor() {
-    this.logger = pino({
+  constructor(parentLogger?: pino.Logger) {
+    if (parentLogger) {
+      this.logger = parentLogger;
+      return;
+    }
+
+    const options: pino.LoggerOptions = {
       level: config.logging.level,
-      transport: {
+    };
+
+    if (!config.isProduction) {
+      options.transport = {
         target: 'pino-pretty',
         options: {
           colorize: true,
           translateTime: 'HH:MM:ss Z',
           ignore: 'pid,hostname',
         },
-      },
-    });
+      };
+    }
+
+    this.logger = pino(options);
   }
 
   private buildContext(context?: LogContext): Record<string, unknown> {
@@ -48,13 +58,15 @@ class Logger {
     this.logger.warn(this.buildContext(context), message);
   }
 
-  error(message: string, error?: Error, context?: LogContext): void {
-    const errorContext = error
+  error(message: string, error?: unknown, context?: LogContext): void {
+    const normalizedError = error instanceof Error
+      ? error
+      : error === undefined ? undefined : new Error(String(error));
+    const errorContext = normalizedError
       ? {
           error: {
-            message: maskSensitiveData(error.message),
-            stack: error.stack,
-            name: error.name,
+            message: maskSensitiveData(normalizedError.message),
+            name: normalizedError.name,
           },
           ...context,
         }
@@ -64,9 +76,8 @@ class Logger {
   }
 
   child(bindings: LogContext): Logger {
-    const childLogger = new Logger();
-    childLogger.logger = this.logger.child(bindings);
-    return childLogger;
+    const safeBindings = maskObjectForLog(bindings);
+    return new Logger(this.logger.child(safeBindings));
   }
 }
 

@@ -32,6 +32,7 @@ class ChatwootClient {
     
     const response = await fetch(url, {
       method,
+      signal: AbortSignal.timeout(10_000),
       headers: {
         'Content-Type': 'application/json',
         'api_access_token': this.apiToken,

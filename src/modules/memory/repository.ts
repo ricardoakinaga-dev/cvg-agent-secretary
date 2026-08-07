@@ -1,4 +1,5 @@
 import { query } from '../../shared/db/index.js';
+import { config } from '../../config/index.js';
 import { logger } from '../logging/index.js';
 import { 
   Memory, 
@@ -18,9 +19,9 @@ export class MemoryRepository {
    * List memories by various search criteria
    */
   async find(input: MemorySearchInput): Promise<Memory[]> {
-    const conditions: string[] = [];
-    const params: unknown[] = [];
-    let paramIndex = 1;
+    const conditions: string[] = ['tenant_id = $1'];
+    const params: unknown[] = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     conditions.push('contact_id = $' + paramIndex++);
     params.push(input.contactId);
@@ -65,11 +66,11 @@ export class MemoryRepository {
   async findById(id: string): Promise<Memory | null> {
     const sql = `
       SELECT * FROM customer_memories 
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
     `;
 
     try {
-      const result = await query<MemoryRow>(sql, [id]);
+      const result = await query<MemoryRow>(sql, [config.chatwoot.accountId, id]);
       if (result.rows.length === 0) {
         return null;
       }
@@ -103,11 +104,12 @@ export class MemoryRepository {
     // Check for existing fact with same contact+category+key
     const existingSql = `
       SELECT id FROM customer_memories 
-      WHERE contact_id = $1 AND category = $2 AND key = $3 AND is_active = true
+      WHERE tenant_id = $1 AND contact_id = $2 AND category = $3 AND key = $4 AND is_active = true
     `;
     
     try {
       const existing = await query(existingSql, [
+        config.chatwoot.accountId,
         input.contactId, 
         input.category, 
         input.key
@@ -118,9 +120,9 @@ export class MemoryRepository {
         const deactivateSql = `
           UPDATE customer_memories 
           SET is_active = false, updated_at = NOW()
-          WHERE id = $1
+          WHERE tenant_id = $1 AND id = $2
         `;
-        await query(deactivateSql, [existing.rows[0].id]);
+        await query(deactivateSql, [config.chatwoot.accountId, existing.rows[0].id]);
         logger.info('Deactivated conflicting memory', { 
           oldId: existing.rows[0].id, 
           newKey: input.key 
@@ -130,13 +132,14 @@ export class MemoryRepository {
       // Create new memory
       const sql = `
         INSERT INTO customer_memories (
-          contact_id, pet_id, conversation_id, category, key, value, 
+          tenant_id, contact_id, pet_id, conversation_id, category, key, value,
           confidence, source, is_active, last_confirmed_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING *
       `;
 
       const params = [
+        config.chatwoot.accountId,
         input.contactId,
         input.petId || null,
         input.conversationId || null,
@@ -163,8 +166,8 @@ export class MemoryRepository {
    */
   async update(id: string, input: UpdateMemoryInput): Promise<Memory> {
     const fields: string[] = [];
-    const params: unknown[] = [];
-    let paramIndex = 1;
+    const params: unknown[] = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     const updateField = (field: string, value: unknown) => {
       if (value !== undefined) {
@@ -203,7 +206,7 @@ export class MemoryRepository {
     const sql = `
       UPDATE customer_memories 
       SET ${fields.join(', ')}
-      WHERE id = $${paramIndex++}
+      WHERE tenant_id = $1 AND id = $${paramIndex++}
       RETURNING *
     `;
     params.push(id);
@@ -228,11 +231,11 @@ export class MemoryRepository {
     const sql = `
       UPDATE customer_memories 
       SET is_active = false, updated_at = NOW()
-      WHERE id = $1
+      WHERE tenant_id = $1 AND id = $2
     `;
 
     try {
-      const result = await query(sql, [id]);
+      const result = await query(sql, [config.chatwoot.accountId, id]);
       if (result.rowCount === 0) {
         logger.warn('Memory not found for deactivation', { id });
       } else {

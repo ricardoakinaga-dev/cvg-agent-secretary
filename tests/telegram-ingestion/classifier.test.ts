@@ -144,7 +144,7 @@ R: Sim, temos plantão 24h.`;
       const result = classifierService.validate(content);
 
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('script injection');
+      expect(result.errors).toContainEqual(expect.stringContaining('script injection'));
     });
 
     it('should warn about URLs', () => {

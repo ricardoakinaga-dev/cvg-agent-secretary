@@ -215,6 +215,19 @@ class ClassifierService {
       };
     }
 
+    // Explicit Q&A syntax is authoritative. The answer may contain hours or
+    // prices, but that must not re-route an FAQ into a structured schedule or
+    // price record.
+    if (/^(?:P:|Pergunta:)\s*.+/im.test(combinedText)) {
+      return {
+        type: 'faq',
+        confidence: 0.95,
+        title: this.extractTitle(content, title),
+        tags: ['faq', ...this.extractDomainTags(combinedText)],
+        extractedData: this.extractStructuredData('faq', content),
+      };
+    }
+
     // Score each content type
     for (const [contentType, config] of Object.entries(CLASSIFICATION_PATTERNS)) {
       const type = contentType as TelegramContentType;
@@ -251,7 +264,7 @@ class ClassifierService {
       type: bestMatch,
       confidence,
       title: this.extractTitle(content, title),
-      tags: [...new Set(detectedTags)],
+      tags: [...new Set([...detectedTags, ...this.extractDomainTags(combinedText)])],
       extractedData: this.extractStructuredData(bestMatch, content),
     };
   }
@@ -261,6 +274,14 @@ class ClassifierService {
    */
   private isCommand(content: string): boolean {
     return /^\/[a-zA-Z]+/.test(content.trim());
+  }
+
+  private extractDomainTags(content: string): string[] {
+    const tags: string[] = [];
+    if (/\bemerg[eê]ncia\b/i.test(content)) {
+      tags.push('emergência');
+    }
+    return tags;
   }
 
   /**

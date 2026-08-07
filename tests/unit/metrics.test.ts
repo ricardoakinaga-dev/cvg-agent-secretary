@@ -79,6 +79,25 @@ describe('Metrics', () => {
       
       expect(allMetrics.counters).toHaveProperty('counter1', 1);
       expect(allMetrics.gauges).toHaveProperty('gauge1', 10);
+      expect(allMetrics.histograms).toHaveProperty('hist1', {
+        count: 1,
+        sum: 100,
+        min: 100,
+        max: 100,
+      });
+    });
+
+    it('exports counters, gauges, and histogram aggregates for Prometheus scraping', () => {
+      metrics.incrementCounter('requests_total', { status: 'ok' });
+      metrics.setGauge('queue_depth', 2);
+      metrics.recordHistogram('queue_age_ms', 25, { worker: 'a' });
+
+      const output = metrics.toPrometheus();
+
+      expect(output).toContain('requests_total{status="ok"} 1');
+      expect(output).toContain('queue_depth 2');
+      expect(output).toContain('queue_age_ms_sum{worker="a"} 25');
+      expect(output).toContain('queue_age_ms_count{worker="a"} 1');
     });
   });
 

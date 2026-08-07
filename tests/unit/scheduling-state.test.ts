@@ -34,6 +34,7 @@ describe('scheduling state machine', () => {
       stage: 'waiting_slot_confirmation',
       appointmentId: 'appointment-1',
       slotId: 'slot-1',
+      contactId: 'contact-1',
       lastIntent: 'agendamento',
     });
     mockConfirmAppointment.mockResolvedValue({
@@ -47,12 +48,17 @@ describe('scheduling state machine', () => {
 
     const result = await handleSchedulingStateMachine('conversation-1', 'sim, pode confirmar');
 
-    expect(mockConfirmAppointment).toHaveBeenCalledWith({ appointmentId: 'appointment-1' });
+    expect(mockConfirmAppointment).toHaveBeenCalledWith({
+      appointmentId: 'appointment-1',
+      conversationId: 'conversation-1',
+      contactId: 'contact-1',
+    });
     expect(result.handled).toBe(true);
     expect(result.stage).toBe('confirmed');
 
     const state = await getSchedulingState('conversation-1');
     expect(state?.stage).toBe('confirmed');
+    expect(state?.contactId).toBe('contact-1');
   });
 
   it('asks for another time when the tutor rejects the pending slot', async () => {
@@ -60,6 +66,7 @@ describe('scheduling state machine', () => {
       stage: 'waiting_slot_confirmation',
       appointmentId: 'appointment-1',
       slotId: 'slot-1',
+      contactId: 'contact-1',
       lastIntent: 'agendamento',
     });
 
@@ -69,6 +76,26 @@ describe('scheduling state machine', () => {
     expect(result.handled).toBe(true);
     expect(result.stage).toBe('collecting_details');
     expect(result.message).toContain('outro dia ou horario');
+    expect((await getSchedulingState('conversation-1'))?.contactId).toBe('contact-1');
+  });
+
+  it('fails closed when a legacy pending state has no contact owner', async () => {
+    await setSchedulingState('conversation-1', {
+      stage: 'waiting_slot_confirmation',
+      appointmentId: 'appointment-1',
+      slotId: 'slot-1',
+      lastIntent: 'agendamento',
+    });
+
+    const result = await handleSchedulingStateMachine('conversation-1', 'sim, pode confirmar');
+
+    expect(mockConfirmAppointment).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      handled: true,
+      stage: 'waiting_slot_confirmation',
+      appointmentId: 'appointment-1',
+      message: 'Nao consegui confirmar esse horario automaticamente. Vou chamar um atendente para verificar para voce.',
+    });
   });
 
   it('does not handle unrelated messages', async () => {

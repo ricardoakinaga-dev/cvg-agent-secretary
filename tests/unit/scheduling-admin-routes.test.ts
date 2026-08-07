@@ -94,7 +94,7 @@ describe('scheduling admin routes', () => {
     });
   });
 
-  it('allows viewers to list services', async () => {
+  it('allows the authenticated service principal to list services', async () => {
     mockSchedulingRepository.listServices.mockResolvedValue([
       { id: 'service-1', name: 'Consulta', durationMinutes: 30, requiresHumanApproval: false, isActive: true },
     ]);
@@ -103,7 +103,7 @@ describe('scheduling admin routes', () => {
       const response = await fetch(`${baseUrl}/api/scheduling/services`, {
         headers: authHeaders('viewer'),
       });
-      const body = await response.json();
+      const body = await response.json() as { count: number };
 
       expect(response.status).toBe(200);
       expect(body.count).toBe(1);
@@ -111,7 +111,15 @@ describe('scheduling admin routes', () => {
     });
   });
 
-  it('rejects viewers when creating services', async () => {
+  it('ignores a client-supplied viewer role and uses the trusted service principal', async () => {
+    mockSchedulingRepository.createService.mockResolvedValue({
+      id: 'service-1',
+      name: 'Consulta',
+      durationMinutes: 30,
+      requiresHumanApproval: false,
+      isActive: true,
+    });
+
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/scheduling/services`, {
         method: 'POST',
@@ -119,8 +127,8 @@ describe('scheduling admin routes', () => {
         body: JSON.stringify({ name: 'Consulta' }),
       });
 
-      expect(response.status).toBe(403);
-      expect(mockSchedulingRepository.createService).not.toHaveBeenCalled();
+      expect(response.status).toBe(201);
+      expect(mockSchedulingRepository.createService).toHaveBeenCalledWith({ name: 'Consulta' });
     });
   });
 
@@ -196,7 +204,7 @@ describe('scheduling admin routes', () => {
         `${baseUrl}/api/scheduling/slots?from=2026-06-01T00:00:00.000Z&to=2026-06-02T00:00:00.000Z&status=available&limit=10`,
         { headers: authHeaders('viewer') }
       );
-      const body = await response.json();
+      const body = await response.json() as { count: number };
 
       expect(response.status).toBe(200);
       expect(body.count).toBe(1);

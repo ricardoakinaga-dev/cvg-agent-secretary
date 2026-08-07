@@ -62,6 +62,33 @@ describe('chatwoot integration', () => {
     expect(result).not.toContain('PERGUNTAS PENDENTES');
   });
 
+  it('bounds private handoff notes while preserving essential and recent context', () => {
+    const result = generateHandoffSummary({
+      ...summary,
+      whatClientWanted: `Agendar consulta ${'urgente '.repeat(1000)}`,
+      handoffReason: `Falha operacional ${'agenda '.repeat(1000)}`,
+      conversationHistory: Array.from(
+        { length: 100 },
+        (_, index) => `Mensagem ${index + 1}: ${'contexto '.repeat(100)}`
+      ),
+      pendingQuestions: Array.from(
+        { length: 30 },
+        (_, index) => `Pergunta essencial ${index + 1}: ${'detalhe '.repeat(50)}`
+      ),
+      whatWasAnswered: Array.from(
+        { length: 30 },
+        (_, index) => `Resposta essencial ${index + 1}: ${'detalhe '.repeat(50)}`
+      ),
+    });
+
+    expect(result.length).toBeLessThanOrEqual(6000);
+    expect(result).toContain('Maria');
+    expect(result).toContain('Agendar consulta');
+    expect(result).toContain('Falha operacional');
+    expect(result).toContain('Mensagem 100');
+    expect(result).toContain('conteudo omitido');
+  });
+
   it('executes handoff by labeling the conversation and adding a private note', async () => {
     mockChatwootClient.addLabel.mockResolvedValue(undefined);
     mockChatwootClient.sendMessage.mockResolvedValue({ id: 1 });

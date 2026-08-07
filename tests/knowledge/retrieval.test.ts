@@ -2,33 +2,33 @@
 // Phase 3: RAG and Institutional Knowledge
 
 import { KnowledgeRetrievalService } from '../../src/modules/knowledge/retrieval';
-import { KnowledgeSearchOptions, KnowledgeCategory } from '../../src/modules/knowledge/types';
+import { KnowledgeSearchOptions, KnowledgeCategory, KnowledgeChunk } from '../../src/modules/knowledge/types';
 
 // Mock the dependencies
-jest.mock('../../src/modules/knowledge/repository', () => ({
+vi.mock('../../src/modules/knowledge/repository', () => ({
   knowledgeRepository: {
-    searchChunksFullText: jest.fn(),
-    getPublishedDocuments: jest.fn(),
+    searchChunksFullText: vi.fn(),
+    getPublishedDocuments: vi.fn(),
   },
 }));
 
-jest.mock('../../src/modules/openai/client', () => ({
+vi.mock('../../src/modules/openai/client', () => ({
   openaiClient: {
-    generateEmbedding: jest.fn().mockResolvedValue([0.1, 0.2, 0.3]),
+    generateEmbedding: vi.fn().mockResolvedValue([0.1, 0.2, 0.3]),
   },
 }));
 
-jest.mock('../../src/modules/logging', () => ({
+vi.mock('../../src/modules/logging', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    child: jest.fn().mockReturnThis(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn().mockReturnThis(),
   },
 }));
 
-jest.mock('../../src/config', () => ({
+vi.mock('../../src/config', () => ({
   config: {
     knowledge: {
       vectorStore: 'postgres',
@@ -46,24 +46,44 @@ jest.mock('../../src/config', () => ({
     openai: {
       apiKey: 'test-key',
     },
+    chatwoot: {
+      accountId: '1',
+    },
   },
 }));
 
 import { knowledgeRepository } from '../../src/modules/knowledge/repository';
 
+function createChunk(overrides: Partial<KnowledgeChunk>): KnowledgeChunk {
+  return {
+    id: 'chunk-1',
+    documentId: 'document-1',
+    chunkIndex: 0,
+    content: 'Knowledge content',
+    category: 'faq',
+    tags: [],
+    version: 1,
+    source: 'manual',
+    isActive: true,
+    createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
+
 describe('KnowledgeRetrievalService', () => {
   let retrievalService: KnowledgeRetrievalService;
 
   beforeEach(() => {
-    jest.clearAllMocks();
-    (knowledgeRepository.getPublishedDocuments as jest.Mock).mockResolvedValue([]);
+    vi.clearAllMocks();
+    vi.mocked(knowledgeRepository.getPublishedDocuments).mockResolvedValue([]);
     retrievalService = new KnowledgeRetrievalService();
   });
 
   describe('search', () => {
     it('should return empty array when no results found', async () => {
       // Arrange
-      (knowledgeRepository.searchChunksFullText as jest.Mock).mockResolvedValue([]);
+      vi.mocked(knowledgeRepository.searchChunksFullText).mockResolvedValue([]);
 
       // Act
       const results = await retrievalService.search({
@@ -78,15 +98,13 @@ describe('KnowledgeRetrievalService', () => {
     it('should return results when knowledge is found', async () => {
       // Arrange
       const mockChunks = [
-        {
+        createChunk({
           id: 'chunk-1',
           content: 'Our hospital works from 7am to 7pm',
           category: 'faq' as KnowledgeCategory,
-          source: 'manual',
-          version: 1,
-        },
+        }),
       ];
-      (knowledgeRepository.searchChunksFullText as jest.Mock).mockResolvedValue(mockChunks);
+      vi.mocked(knowledgeRepository.searchChunksFullText).mockResolvedValue(mockChunks);
 
       // Act
       const results = await retrievalService.search({
@@ -99,9 +117,25 @@ describe('KnowledgeRetrievalService', () => {
       expect(results[0].content).toBe('Our hospital works from 7am to 7pm');
     });
 
+    it('should exclude internal chunks from the public conversation runtime', async () => {
+      vi.mocked(knowledgeRepository.searchChunksFullText).mockResolvedValue([
+        createChunk({
+          content: 'Escala interna da equipe',
+          tags: ['restrito'],
+        }),
+      ]);
+
+      const results = await retrievalService.search({
+        query: 'escala da equipe',
+        limit: 3,
+      });
+
+      expect(results).toEqual([]);
+    });
+
     it('should filter by category when provided', async () => {
       // Arrange
-      (knowledgeRepository.searchChunksFullText as jest.Mock).mockResolvedValue([]);
+      vi.mocked(knowledgeRepository.searchChunksFullText).mockResolvedValue([]);
 
       // Act
       await retrievalService.search({
@@ -120,7 +154,7 @@ describe('KnowledgeRetrievalService', () => {
 
     it('should respect limit parameter', async () => {
       // Arrange
-      (knowledgeRepository.searchChunksFullText as jest.Mock).mockResolvedValue([]);
+      vi.mocked(knowledgeRepository.searchChunksFullText).mockResolvedValue([]);
 
       // Act
       await retrievalService.search({
@@ -139,15 +173,13 @@ describe('KnowledgeRetrievalService', () => {
     it('should apply minimum relevance filter', async () => {
       // Arrange
       const mockChunks = [
-        {
+        createChunk({
           id: 'chunk-low',
           content: 'Low relevance content',
           category: 'faq' as KnowledgeCategory,
-          source: 'manual',
-          version: 1,
-        },
+        }),
       ];
-      (knowledgeRepository.searchChunksFullText as jest.Mock).mockResolvedValue(mockChunks);
+      vi.mocked(knowledgeRepository.searchChunksFullText).mockResolvedValue(mockChunks);
 
       // Act - with high minimum relevance
       const results = await retrievalService.search({
@@ -164,7 +196,7 @@ describe('KnowledgeRetrievalService', () => {
   describe('healthCheck', () => {
     it('should return true when database is healthy', async () => {
       // Arrange
-      (knowledgeRepository.getPublishedDocuments as jest.Mock).mockResolvedValue([]);
+      vi.mocked(knowledgeRepository.getPublishedDocuments).mockResolvedValue([]);
 
       // Act
       const isHealthy = await retrievalService.healthCheck();
@@ -175,7 +207,7 @@ describe('KnowledgeRetrievalService', () => {
 
     it('should return false when database fails', async () => {
       // Arrange
-      (knowledgeRepository.getPublishedDocuments as jest.Mock).mockRejectedValue(new Error('DB Error'));
+      vi.mocked(knowledgeRepository.getPublishedDocuments).mockRejectedValue(new Error('DB Error'));
 
       // Act
       const isHealthy = await retrievalService.healthCheck();

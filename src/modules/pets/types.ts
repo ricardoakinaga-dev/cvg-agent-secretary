@@ -2,6 +2,7 @@
 
 export interface Pet {
   id: string;
+  tenantId: string;
   chatwootId: number | null;
   contactId: string;
   name: string;
@@ -76,6 +77,7 @@ export type ValidSpecies = typeof VALID_SPECIES[number];
 // DB row type (snake_case from PostgreSQL)
 export interface PetRow {
   id: string;
+  tenant_id: string;
   chatwoot_id: number | null;
   contact_id: string;
   name: string;
@@ -102,6 +104,7 @@ export interface PetRow {
 export function mapRowToPet(row: PetRow): Pet {
   return {
     id: row.id,
+    tenantId: row.tenant_id,
     chatwootId: row.chatwoot_id,
     contactId: row.contact_id,
     name: row.name,

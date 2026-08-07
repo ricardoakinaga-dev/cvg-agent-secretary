@@ -1,4 +1,5 @@
 import { query } from '../../shared/db/index.js';
+import { config } from '../../config/index.js';
 import { logger } from '../logging/index.js';
 import { 
   ConversationSummary, 
@@ -15,13 +16,13 @@ export class SummaryRepository {
   async findByConversation(conversationId: string): Promise<ConversationSummary | null> {
     const sql = `
       SELECT * FROM conversation_summaries 
-      WHERE conversation_id = $1
+      WHERE tenant_id = $1 AND conversation_id = $2
       ORDER BY created_at DESC
       LIMIT 1
     `;
 
     try {
-      const result = await query<SummaryRow>(sql, [conversationId]);
+      const result = await query<SummaryRow>(sql, [config.chatwoot.accountId, conversationId]);
       if (result.rows.length === 0) {
         return null;
       }
@@ -38,13 +39,14 @@ export class SummaryRepository {
   async create(input: CreateSummaryInput): Promise<ConversationSummary> {
     const sql = `
       INSERT INTO conversation_summaries (
-        conversation_id, summary_text, key_points, extracted_facts,
+        tenant_id, conversation_id, summary_text, key_points, extracted_facts,
         intent, sentiment, needs_handoff, handoff_reason, generated_by, model_version
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `;
 
     const params = [
+      config.chatwoot.accountId,
       input.conversationId,
       input.summaryText,
       JSON.stringify(input.keyPoints || []),
@@ -78,8 +80,8 @@ export class SummaryRepository {
     input: Partial<CreateSummaryInput>
   ): Promise<ConversationSummary> {
     const fields: string[] = [];
-    const params: unknown[] = [];
-    let paramIndex = 1;
+    const params: unknown[] = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     const updateField = (field: string, value: unknown) => {
       if (value !== undefined) {
@@ -107,7 +109,7 @@ export class SummaryRepository {
     const sql = `
       UPDATE conversation_summaries 
       SET ${fields.join(', ')}
-      WHERE id = $${paramIndex++}
+      WHERE tenant_id = $1 AND id = $${paramIndex++}
       RETURNING *
     `;
     params.push(id);
@@ -131,14 +133,14 @@ export class SummaryRepository {
   async findByContact(contactId: string, limit: number = 10): Promise<ConversationSummary[]> {
     const sql = `
       SELECT cs.* FROM conversation_summaries cs
-      JOIN conversations c ON cs.conversation_id = c.id
-      WHERE c.chatwoot_contact_id = $1
+      JOIN conversations c ON c.tenant_id = cs.tenant_id AND c.id = cs.conversation_id
+      WHERE cs.tenant_id = $1 AND c.chatwoot_contact_id = $2
       ORDER BY cs.created_at DESC
-      LIMIT $2
+      LIMIT $3
     `;
 
     try {
-      const result = await query<SummaryRow>(sql, [contactId, limit]);
+      const result = await query<SummaryRow>(sql, [config.chatwoot.accountId, contactId, limit]);
       return result.rows.map(mapRowToSummary);
     } catch (error) {
       logger.error('Error finding summaries by contact', error as Error, { contactId });

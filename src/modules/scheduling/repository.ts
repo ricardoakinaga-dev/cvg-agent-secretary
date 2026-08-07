@@ -1,4 +1,5 @@
 import { getClient, query } from '../../shared/db';
+import { config } from '../../config';
 import {
   Appointment,
   AppointmentProvider,
@@ -10,6 +11,7 @@ import {
   CreateAppointmentServiceInput,
   CreateAppointmentSlotInput,
   ConfirmAppointmentInput,
+  RescheduleAppointmentInput,
   ReserveSlotInput,
 } from './types';
 
@@ -111,16 +113,45 @@ function mapAppointment(row: AppointmentRow): Appointment {
   };
 }
 
+function requireOwnership(
+  input: { conversationId?: string; contactId?: string }
+): asserts input is { conversationId: string; contactId: string } {
+  if (!input.conversationId?.trim() || !input.contactId?.trim()) {
+    throw new Error('Appointment ownership context is required');
+  }
+}
+
 export class SchedulingRepository {
+  private async expireReservations(): Promise<void> {
+    await query(`
+      WITH expired_reservations AS (
+        UPDATE appointments
+        SET status = 'expired', updated_at = NOW()
+        WHERE tenant_id = $1
+          AND status = 'reserved'
+          AND reservation_expires_at IS NOT NULL
+          AND reservation_expires_at <= NOW()
+        RETURNING slot_id
+      )
+      UPDATE appointment_slots AS slots
+      SET status = 'available', updated_at = NOW()
+      FROM expired_reservations AS expired
+      WHERE slots.id = expired.slot_id
+        AND slots.tenant_id = $1
+        AND slots.status = 'reserved'
+    `, [config.chatwoot.accountId]);
+  }
+
   async createService(input: CreateAppointmentServiceInput): Promise<AppointmentService> {
     const result = await query<ServiceRow>(
       `
         INSERT INTO appointment_services (
-          name, description, duration_minutes, requires_human_approval
-        ) VALUES ($1, $2, $3, $4)
+          tenant_id, name, description, duration_minutes, requires_human_approval
+        ) VALUES ($1, $2, $3, $4, $5)
         RETURNING *
       `,
       [
+        config.chatwoot.accountId,
         input.name,
         input.description || null,
         input.durationMinutes || 30,
@@ -136,9 +167,10 @@ export class SchedulingRepository {
       `
         SELECT *
         FROM appointment_services
-        WHERE is_active = true
+        WHERE tenant_id = $1 AND is_active = true
         ORDER BY name ASC
-      `
+      `,
+      [config.chatwoot.accountId]
     );
 
     return result.rows.map(mapService);
@@ -147,11 +179,11 @@ export class SchedulingRepository {
   async createProvider(input: CreateAppointmentProviderInput): Promise<AppointmentProvider> {
     const result = await query<ProviderRow>(
       `
-        INSERT INTO appointment_providers (name, sector)
-        VALUES ($1, $2)
+        INSERT INTO appointment_providers (tenant_id, name, sector)
+        VALUES ($1, $2, $3)
         RETURNING *
       `,
-      [input.name, input.sector || null]
+      [config.chatwoot.accountId, input.name, input.sector || null]
     );
 
     return mapProvider(result.rows[0]);
@@ -162,9 +194,10 @@ export class SchedulingRepository {
       `
         SELECT *
         FROM appointment_providers
-        WHERE is_active = true
+        WHERE tenant_id = $1 AND is_active = true
         ORDER BY name ASC
-      `
+      `,
+      [config.chatwoot.accountId]
     );
 
     return result.rows.map(mapProvider);
@@ -174,11 +207,12 @@ export class SchedulingRepository {
     const result = await query<SlotRow>(
       `
         INSERT INTO appointment_slots (
-          service_id, provider_id, starts_at, ends_at, status, metadata
-        ) VALUES ($1, $2, $3, $4, $5, $6)
+          tenant_id, service_id, provider_id, starts_at, ends_at, status, metadata
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING *
       `,
       [
+        config.chatwoot.accountId,
         input.serviceId || null,
         input.providerId || null,
         input.startsAt,
@@ -199,10 +233,13 @@ export class SchedulingRepository {
     status?: AppointmentSlot['status'];
     limit?: number;
   }): Promise<AppointmentSlot[]> {
-    const params: unknown[] = [input.from, input.to];
+    await this.expireReservations();
+
+    const params: unknown[] = [config.chatwoot.accountId, input.from, input.to];
     const clauses = [
-      's.starts_at >= $1',
-      's.starts_at < $2',
+      's.tenant_id = $1',
+      's.starts_at >= $2',
+      's.starts_at < $3',
     ];
 
     if (input.serviceId) {
@@ -239,8 +276,15 @@ export class SchedulingRepository {
   }
 
   async checkAvailableSlots(input: CheckAvailableSlotsInput): Promise<AppointmentSlot[]> {
-    const params: unknown[] = [input.from, input.to, input.limit || 5];
-    const serviceFilter = input.serviceId ? 'AND s.service_id = $4' : '';
+    await this.expireReservations();
+
+    const params: unknown[] = [
+      config.chatwoot.accountId,
+      input.from,
+      input.to,
+      input.limit || 5,
+    ];
+    const serviceFilter = input.serviceId ? 'AND s.service_id = $5' : '';
     if (input.serviceId) params.push(input.serviceId);
 
     const result = await query<SlotRow>(
@@ -249,12 +293,13 @@ export class SchedulingRepository {
         FROM appointment_slots s
         LEFT JOIN appointment_services svc ON svc.id = s.service_id
         LEFT JOIN appointment_providers p ON p.id = s.provider_id
-        WHERE s.status = 'available'
-          AND s.starts_at >= $1
-          AND s.starts_at < $2
+        WHERE s.tenant_id = $1
+          AND s.status = 'available'
+          AND s.starts_at >= $2
+          AND s.starts_at < $3
           ${serviceFilter}
         ORDER BY s.starts_at ASC
-        LIMIT $3
+        LIMIT $4
       `,
       params
     );
@@ -263,6 +308,7 @@ export class SchedulingRepository {
   }
 
   async reserveSlot(input: ReserveSlotInput): Promise<Appointment> {
+    requireOwnership(input);
     const client = await getClient();
     const holdMinutes = input.holdMinutes || 10;
 
@@ -273,10 +319,10 @@ export class SchedulingRepository {
         `
           UPDATE appointment_slots
           SET status = 'reserved', updated_at = NOW()
-          WHERE id = $1 AND status = 'available'
+          WHERE id = $1 AND tenant_id = $2 AND status = 'available'
           RETURNING *
         `,
-        [input.slotId]
+        [input.slotId, config.chatwoot.accountId]
       );
 
       if (slotResult.rows.length === 0) {
@@ -287,12 +333,13 @@ export class SchedulingRepository {
       const appointmentResult = await client.query<AppointmentRow>(
         `
           INSERT INTO appointments (
-            slot_id, service_id, provider_id, conversation_id, contact_id, pet_id,
+            tenant_id, slot_id, service_id, provider_id, conversation_id, contact_id, pet_id,
             tutor_name, pet_name, reason, status, reservation_expires_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'reserved', NOW() + ($10 || ' minutes')::interval)
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'reserved', NOW() + ($11 || ' minutes')::interval)
           RETURNING *
         `,
         [
+          config.chatwoot.accountId,
           slot.id,
           input.serviceId || slot.service_id,
           slot.provider_id,
@@ -317,6 +364,7 @@ export class SchedulingRepository {
   }
 
   async confirmAppointment(input: ConfirmAppointmentInput): Promise<Appointment> {
+    requireOwnership(input);
     const client = await getClient();
 
     try {
@@ -326,19 +374,23 @@ export class SchedulingRepository {
         `
           UPDATE appointments
           SET status = 'confirmed', confirmed_at = NOW(), updated_at = NOW()
-          WHERE id = $1 AND status = 'reserved'
+          WHERE id = $1
+            AND tenant_id = $4
+            AND status = 'reserved'
+            AND conversation_id = $2
+            AND contact_id = $3
           RETURNING *
         `,
-        [input.appointmentId]
+        [input.appointmentId, input.conversationId, input.contactId, config.chatwoot.accountId]
       );
 
       if (appointmentResult.rows.length === 0) {
-        throw new Error('Appointment is not reserved or does not exist');
+        throw new Error('Appointment is not reserved or does not belong to this conversation');
       }
 
       await client.query(
-        `UPDATE appointment_slots SET status = 'booked', updated_at = NOW() WHERE id = $1`,
-        [appointmentResult.rows[0].slot_id]
+        `UPDATE appointment_slots SET status = 'booked', updated_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+        [appointmentResult.rows[0].slot_id, config.chatwoot.accountId]
       );
 
       await client.query('COMMIT');
@@ -352,6 +404,7 @@ export class SchedulingRepository {
   }
 
   async cancelAppointment(input: CancelAppointmentInput): Promise<Appointment> {
+    requireOwnership(input);
     const client = await getClient();
 
     try {
@@ -361,23 +414,123 @@ export class SchedulingRepository {
         `
           UPDATE appointments
           SET status = 'cancelled', cancelled_at = NOW(), reason = COALESCE($2, reason), updated_at = NOW()
-          WHERE id = $1 AND status IN ('reserved', 'confirmed')
+          WHERE id = $1
+            AND tenant_id = $5
+            AND status IN ('reserved', 'confirmed')
+            AND conversation_id = $3
+            AND contact_id = $4
           RETURNING *
         `,
-        [input.appointmentId, input.reason || null]
+        [
+          input.appointmentId,
+          input.reason || null,
+          input.conversationId,
+          input.contactId,
+          config.chatwoot.accountId,
+        ]
       );
 
       if (appointmentResult.rows.length === 0) {
-        throw new Error('Appointment cannot be cancelled');
+        throw new Error('Appointment cannot be cancelled or does not belong to this conversation');
       }
 
       await client.query(
-        `UPDATE appointment_slots SET status = 'available', updated_at = NOW() WHERE id = $1`,
-        [appointmentResult.rows[0].slot_id]
+        `UPDATE appointment_slots SET status = 'available', updated_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+        [appointmentResult.rows[0].slot_id, config.chatwoot.accountId]
       );
 
       await client.query('COMMIT');
       return mapAppointment(appointmentResult.rows[0]);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async rescheduleAppointment(input: RescheduleAppointmentInput): Promise<Appointment> {
+    requireOwnership(input);
+    const client = await getClient();
+    const holdMinutes = input.holdMinutes || 10;
+
+    try {
+      await client.query('BEGIN');
+
+      const currentAppointmentResult = await client.query<AppointmentRow>(
+        `
+          SELECT *
+          FROM appointments
+          WHERE id = $1
+            AND tenant_id = $4
+            AND status IN ('reserved', 'confirmed')
+            AND conversation_id = $2
+            AND contact_id = $3
+          FOR UPDATE
+        `,
+        [input.appointmentId, input.conversationId, input.contactId, config.chatwoot.accountId]
+      );
+
+      if (currentAppointmentResult.rows.length === 0) {
+        throw new Error('Appointment cannot be rescheduled or does not belong to this conversation');
+      }
+
+      const newSlotResult = await client.query<SlotRow>(
+        `
+          UPDATE appointment_slots
+          SET status = 'reserved', updated_at = NOW()
+          WHERE id = $1 AND tenant_id = $2 AND status = 'available'
+          RETURNING *
+        `,
+        [input.slotId, config.chatwoot.accountId]
+      );
+
+      if (newSlotResult.rows.length === 0) {
+        throw new Error('Slot is not available');
+      }
+
+      const currentAppointment = currentAppointmentResult.rows[0];
+      const newSlot = newSlotResult.rows[0];
+      const newAppointmentResult = await client.query<AppointmentRow>(
+        `
+          INSERT INTO appointments (
+            tenant_id, slot_id, service_id, provider_id, conversation_id, contact_id, pet_id,
+            tutor_name, pet_name, reason, status, reservation_expires_at
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'reserved', NOW() + ($11 || ' minutes')::interval)
+          RETURNING *
+        `,
+        [
+          config.chatwoot.accountId,
+          newSlot.id,
+          input.serviceId || newSlot.service_id,
+          newSlot.provider_id,
+          input.conversationId,
+          input.contactId,
+          input.petId || currentAppointment.pet_id,
+          input.tutorName || currentAppointment.tutor_name,
+          input.petName || currentAppointment.pet_name,
+          input.reason || currentAppointment.reason,
+          holdMinutes,
+        ]
+      );
+
+      await client.query(
+        `
+          UPDATE appointments
+          SET status = 'cancelled', cancelled_at = NOW(),
+              reason = COALESCE($2, reason), updated_at = NOW()
+          WHERE id = $1 AND tenant_id = $3
+        `,
+        [input.appointmentId, input.reason || null, config.chatwoot.accountId]
+      );
+
+      await client.query(
+        `UPDATE appointment_slots SET status = 'available', updated_at = NOW() WHERE id = $1 AND tenant_id = $2`,
+        [currentAppointment.slot_id, config.chatwoot.accountId]
+      );
+
+      await client.query('COMMIT');
+      return mapAppointment(newAppointmentResult.rows[0]);
     } catch (error) {
       await client.query('ROLLBACK');
       throw error;

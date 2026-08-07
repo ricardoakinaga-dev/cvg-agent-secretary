@@ -194,12 +194,75 @@ describe('Validation Schemas', () => {
           id: 789,
           content: 'Hello',
           message_type: 0,
+          sender: {
+            id: 456,
+            name: 'John Doe',
+            type: 'contact',
+          },
         },
       };
       
       const result = validateInput(ChatwootWebhookSchema, input);
       
       expect(result.success).toBe(true);
+    });
+
+    it('accepts nullable optional contact fields emitted by Chatwoot', () => {
+      const input = {
+        event: 'message_created',
+        conversation: {
+          id: 123,
+          account_id: 1,
+          inbox_id: 2,
+          status: 'open',
+          meta: {
+            sender: {
+              id: 456,
+              name: 'John Doe',
+              email: null,
+              phone_number: null,
+              identifier: null,
+            },
+          },
+        },
+        message: {
+          id: 789,
+          content: 'Hello',
+          message_type: 0,
+          sender: { id: 456, name: 'John Doe', type: 'contact' },
+        },
+      };
+
+      expect(validateInput(ChatwootWebhookSchema, input).success).toBe(true);
+    });
+
+    it('accepts flat incoming webhooks whose top-level sender omits type', () => {
+      const input = {
+        event: 'message_created',
+        id: 789,
+        content: 'Hello',
+        message_type: 'incoming',
+        private: false,
+        account: { id: 1, name: 'Veterinary clinic' },
+        conversation: {
+          id: 123,
+          account_id: 1,
+          inbox_id: 2,
+          status: 'open',
+          meta: {
+            sender: {
+              id: 456,
+              name: 'John Doe',
+            },
+          },
+        },
+        sender: {
+          id: 456,
+          name: 'John Doe',
+        },
+      };
+
+      expect(validateInput(ChatwootWebhookSchema, input).success).toBe(true);
     });
 
     it('should reject invalid event type', () => {
@@ -221,6 +284,113 @@ describe('Validation Schemas', () => {
       const result = validateInput(ChatwootWebhookSchema, input);
       
       expect(result.success).toBe(false);
+    });
+
+    it('requires an account for message events', () => {
+      const input = {
+        event: 'message_created',
+        conversation: {
+          id: 123,
+          inbox_id: 2,
+          status: 'open',
+          contact: { id: 456, name: 'John Doe' },
+        },
+        message: {
+          id: 789,
+          content: 'Hello',
+          message_type: 'incoming',
+          sender: { id: 456, name: 'John Doe', type: 'contact' },
+        },
+      };
+
+      expect(validateInput(ChatwootWebhookSchema, input).success).toBe(false);
+    });
+
+    it('requires the sender for message events', () => {
+      const input = {
+        event: 'message_created',
+        conversation: {
+          id: 123,
+          account_id: 1,
+          inbox_id: 2,
+          status: 'open',
+          contact: { id: 456, name: 'John Doe' },
+        },
+        message: {
+          id: 789,
+          content: 'Hello',
+          message_type: 'incoming',
+        },
+      };
+
+      expect(validateInput(ChatwootWebhookSchema, input).success).toBe(false);
+    });
+
+    it('strips unknown fields at every retained payload level', () => {
+      const input = {
+        event: 'message_created',
+        unexpectedRoot: 'secret passthrough',
+        conversation: {
+          id: 123,
+          account_id: 1,
+          inbox_id: 2,
+          status: 'open',
+          unexpectedConversation: 'remove me',
+          contact: {
+            id: 456,
+            name: 'John Doe',
+            unexpectedContact: 'remove me',
+          },
+        },
+        message: {
+          id: 789,
+          content: 'Hello',
+          message_type: 0,
+          unexpectedMessage: 'remove me',
+          sender: {
+            id: 456,
+            name: 'John Doe',
+            type: 'contact',
+            unexpectedSender: 'remove me',
+          },
+        },
+      };
+
+      const result = validateInput(ChatwootWebhookSchema, input);
+
+      expect(result.success).toBe(true);
+      expect(result.data).not.toHaveProperty('unexpectedRoot');
+      expect(result.data?.conversation).not.toHaveProperty('unexpectedConversation');
+      expect(result.data?.conversation.contact).not.toHaveProperty('unexpectedContact');
+      expect(result.data?.message).not.toHaveProperty('unexpectedMessage');
+      expect(result.data?.message?.sender).not.toHaveProperty('unexpectedSender');
+    });
+
+    it('rejects oversized message content and attachment arrays', () => {
+      const base = {
+        event: 'message_created',
+        conversation: {
+          id: 123,
+          account_id: 1,
+          inbox_id: 2,
+          status: 'open',
+          contact: { id: 456, name: 'John Doe' },
+        },
+        message: {
+          id: 789,
+          content: 'x'.repeat(10_001),
+          message_type: 0,
+          sender: { id: 456, name: 'John Doe', type: 'contact' },
+          attachments: Array.from({ length: 11 }, (_, index) => ({
+            id: index + 1,
+            filename: `file-${index}.txt`,
+            content_type: 'text/plain',
+            file_url: 'https://example.com/file.txt',
+          })),
+        },
+      };
+
+      expect(validateInput(ChatwootWebhookSchema, base).success).toBe(false);
     });
   });
 });

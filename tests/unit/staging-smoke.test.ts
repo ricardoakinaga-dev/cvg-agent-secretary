@@ -57,13 +57,15 @@ describe('staging smoke test', () => {
     const webhookCall = fetchMock.mock.calls[2];
     const requestInit = webhookCall[1] as RequestInit;
     const body = requestInit.body as string;
-    const expectedSignature = `sha256=${createHmac('sha256', 'secret').update(Buffer.from(body)).digest('hex')}`;
+    const timestamp = (requestInit.headers as Record<string, string>)['x-chatwoot-timestamp'];
+    const expectedSignature = `sha256=${createHmac('sha256', 'secret').update(`${timestamp}.${body}`).digest('hex')}`;
 
     expect(webhookCall[0]).toBe('https://agent.example.com/webhooks/chatwoot');
     expect(requestInit.headers).toMatchObject({
       'Content-Type': 'application/json',
       'x-chatwoot-account-id': '1',
       'x-chatwoot-signature': expectedSignature,
+      'x-chatwoot-timestamp': timestamp,
     });
     expect(JSON.parse(body)).toMatchObject({
       event: 'message_created',

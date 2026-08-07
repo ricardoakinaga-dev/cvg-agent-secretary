@@ -4,19 +4,19 @@
 import { searchKnowledge, SearchKnowledgeInput } from '../../src/modules/knowledge/tools';
 
 // Mock the retrieval service
-jest.mock('../../src/modules/knowledge/retrieval', () => ({
+vi.mock('../../src/modules/knowledge/retrieval', () => ({
   knowledgeRetrievalService: {
-    search: jest.fn(),
+    search: vi.fn(),
   },
 }));
 
-jest.mock('../../src/modules/logging', () => ({
+vi.mock('../../src/modules/logging', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    child: jest.fn().mockReturnThis(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn().mockReturnThis(),
   },
 }));
 
@@ -24,7 +24,7 @@ import { knowledgeRetrievalService } from '../../src/modules/knowledge/retrieval
 
 describe('searchKnowledge Tool', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   it('should return empty results when query is empty', async () => {
@@ -51,7 +51,7 @@ describe('searchKnowledge Tool', () => {
         category: 'faq',
       },
     ];
-    (knowledgeRetrievalService.search as jest.Mock).mockResolvedValue(mockResults);
+    vi.mocked(knowledgeRetrievalService.search).mockResolvedValue(mockResults);
 
     const input: SearchKnowledgeInput = { query: 'horário', limit: 3 };
 
@@ -66,7 +66,7 @@ describe('searchKnowledge Tool', () => {
 
   it('should return no results when nothing is found', async () => {
     // Arrange
-    (knowledgeRetrievalService.search as jest.Mock).mockResolvedValue([]);
+    vi.mocked(knowledgeRetrievalService.search).mockResolvedValue([]);
 
     const input: SearchKnowledgeInput = { query: 'nonexistent topic' };
 
@@ -81,7 +81,7 @@ describe('searchKnowledge Tool', () => {
 
   it('should pass category filter to retrieval service', async () => {
     // Arrange
-    (knowledgeRetrievalService.search as jest.Mock).mockResolvedValue([]);
+    vi.mocked(knowledgeRetrievalService.search).mockResolvedValue([]);
 
     const input: SearchKnowledgeInput = { query: 'test', category: 'policy' };
 
@@ -99,7 +99,7 @@ describe('searchKnowledge Tool', () => {
 
   it('should use default limit when not provided', async () => {
     // Arrange
-    (knowledgeRetrievalService.search as jest.Mock).mockResolvedValue([]);
+    vi.mocked(knowledgeRetrievalService.search).mockResolvedValue([]);
 
     const input: SearchKnowledgeInput = { query: 'test' };
 
@@ -116,7 +116,7 @@ describe('searchKnowledge Tool', () => {
 
   it('should handle errors gracefully', async () => {
     // Arrange
-    (knowledgeRetrievalService.search as jest.Mock).mockRejectedValue(new Error('Search failed'));
+    vi.mocked(knowledgeRetrievalService.search).mockRejectedValue(new Error('Search failed'));
 
     const input: SearchKnowledgeInput = { query: 'test' };
 

@@ -1,0 +1,36 @@
+groups:
+  - name: cvg-agent-secretary-recording
+    interval: 30s
+    rules:
+      # Redis queue gauges are shared observations repeated by every pod. MAX
+      # deduplicates them; SUM would multiply depth by the replica count.
+      - record: cvg:webhook_queue_depth:max
+        expr: max without(instance, pod) (webhook_queue_depth{scope="shared"})
+      - record: cvg:webhook_queue_oldest_age_seconds:max
+        expr: max without(instance, pod) (webhook_queue_oldest_age_seconds{scope="shared"})
+      - record: cvg:webhook_queue_collection_up:min
+        expr: min without(instance, pod) (webhook_queue_collection_up{scope="shared"})
+
+      # Process-local counters/histograms are summed across replicas. Prometheus
+      # rate() handles a counter reset when a process restarts.
+      - record: cvg:webhook_processing_rate5m
+        expr: sum without(instance, pod, outcome) (rate(webhook_processing_total[5m]))
+      - record: cvg:webhook_processing_error_rate5m
+        expr: sum without(instance, pod, stage) (rate(webhook_processing_errors_total[5m]))
+      - record: cvg:webhook_processing_error_ratio:rate5m
+        expr: cvg:webhook_processing_error_rate5m / clamp_min(cvg:webhook_processing_rate5m, 0.001)
+      - record: cvg:webhook_processing_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum without(instance, pod, outcome) (rate(webhook_processing_duration_seconds_bucket[5m])))
+      - record: cvg:webhook_queue_age_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum without(instance, pod) (rate(webhook_queue_age_seconds_bucket[5m])))
+      - record: cvg:response_duration_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum without(instance, pod) (rate(analytics_response_duration_seconds_bucket[5m])))
+      - record: cvg:webhook_dlq_increase:5m
+        expr: sum without(instance, pod) (increase(webhook_dlq_total[5m]))
+
+      - record: cvg:ai_provider_error_ratio:rate5m
+        expr: (sum without(instance, pod) (rate(openai_requests_errors[5m])) + sum without(instance, pod) (rate(openrouter_requests_errors[5m]))) / clamp_min(sum without(instance, pod) (rate(openai_requests_total[5m])) + sum without(instance, pod) (rate(openrouter_requests_total[5m])), 0.001)
+      - record: cvg:handoff_ratio:rate15m
+        expr: sum without(instance, pod, outcome) (rate(analytics_handoffs[15m])) / clamp_min(sum without(instance, pod) (rate(analytics_conversations_started[15m])), 0.001)
+      - record: cvg:dependency_up:min
+        expr: min without(instance, pod) (dependency_up)

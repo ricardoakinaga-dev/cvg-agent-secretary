@@ -10,11 +10,15 @@ import {
 } from '../scheduling/tools';
 import { setSchedulingState } from '../scheduling/state';
 import { logger } from '../logging';
+import { agentToolInputSchemas } from './validation';
+import type { ZodTypeAny } from 'zod';
 
 export interface AgentToolContext {
   conversationId?: string;
   contactId?: string;
   contactName?: string;
+  /** Current user-authored turn; never populated from model tool arguments. */
+  userMessage?: string;
 }
 
 export type AgentToolName =
@@ -32,6 +36,7 @@ type JsonRecord = Record<string, unknown>;
 interface AgentToolDefinition {
   name: AgentToolName;
   schema: ChatCompletionTool;
+  validationSchema: ZodTypeAny;
   execute(args: JsonRecord, context: AgentToolContext): Promise<unknown>;
 }
 
@@ -58,9 +63,69 @@ function readStringArray(args: JsonRecord, key: string): string[] | undefined {
   return value.filter((item): item is string => typeof item === 'string');
 }
 
+function getAppointmentOwnership(context: AgentToolContext): {
+  conversationId: string;
+  contactId: string;
+} | null {
+  if (!context.conversationId?.trim() || !context.contactId?.trim()) {
+    return null;
+  }
+
+  return {
+    conversationId: context.conversationId,
+    contactId: context.contactId,
+  };
+}
+
+function ownershipFailure(): { success: false; message: string } {
+  return {
+    success: false,
+    message: 'Appointment ownership context is required',
+  };
+}
+
+const SCHEDULING_MUTATIONS = new Set<AgentToolName>([
+  'reserve_slot',
+  'confirm_appointment',
+  'cancel_appointment',
+  'reschedule_appointment',
+]);
+const USER_AUTHORIZED_MUTATIONS = new Set<AgentToolName>([
+  ...SCHEDULING_MUTATIONS,
+  'notify_sector',
+]);
+
+function normalizeUserMessage(message: string): string {
+  return message
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLowerCase();
+}
+
+function hasUserAuthorization(toolName: AgentToolName, userMessage?: string): boolean {
+  if (!userMessage?.trim()) return false;
+  const message = normalizeUserMessage(userMessage);
+
+  switch (toolName) {
+    case 'reserve_slot':
+      return /\b(agend\w*|reserv\w*|quero|prefiro|pode ser|esse horario|essa data)\b/.test(message);
+    case 'confirm_appointment':
+      return /\b(sim|confirmo|confirmar|fechado|isso mesmo|pode confirmar)\b/.test(message);
+    case 'cancel_appointment':
+      return /\b(cancel\w*|desmarc\w*)\b/.test(message);
+    case 'reschedule_appointment':
+      return /\b(remarc\w*|reagend\w*|trocar|mudar|outro horario)\b/.test(message);
+    case 'notify_sector':
+      return /\b(atendente|humano|recepcao|clinico|gerencia|financeiro|urgent\w*|emergenc\w*)\b/.test(message);
+    default:
+      return true;
+  }
+}
+
 const tools: AgentToolDefinition[] = [
   {
     name: 'search_knowledge',
+    validationSchema: agentToolInputSchemas.search_knowledge,
     schema: {
       type: 'function',
       function: {
@@ -69,14 +134,15 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            query: { type: 'string', description: 'Pergunta ou termo de busca do tutor.' },
+            query: { type: 'string', minLength: 1, maxLength: 1000, description: 'Pergunta ou termo de busca do tutor.' },
             category: {
               type: 'string',
               enum: ['faq', 'policy', 'procedure', 'service', 'orientation'],
             },
-            limit: { type: 'number', minimum: 1, maximum: 5 },
+            limit: { type: 'integer', minimum: 1, maximum: 5 },
           },
           required: ['query'],
+          additionalProperties: false,
         },
       },
     },
@@ -88,6 +154,7 @@ const tools: AgentToolDefinition[] = [
   },
   {
     name: 'check_available_slots',
+    validationSchema: agentToolInputSchemas.check_available_slots,
     schema: {
       type: 'function',
       function: {
@@ -96,12 +163,13 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            serviceId: { type: 'string' },
-            from: { type: 'string', description: 'Inicio da janela em ISO-8601.' },
-            to: { type: 'string', description: 'Fim da janela em ISO-8601.' },
-            limit: { type: 'number', minimum: 1, maximum: 5 },
+            serviceId: { type: 'string', format: 'uuid' },
+            from: { type: 'string', format: 'date-time', description: 'Inicio da janela em ISO-8601.' },
+            to: { type: 'string', format: 'date-time', description: 'Fim da janela em ISO-8601.' },
+            limit: { type: 'integer', minimum: 1, maximum: 5 },
           },
           required: ['from', 'to'],
+          additionalProperties: false,
         },
       },
     },
@@ -121,6 +189,7 @@ const tools: AgentToolDefinition[] = [
   },
   {
     name: 'reserve_slot',
+    validationSchema: agentToolInputSchemas.reserve_slot,
     schema: {
       type: 'function',
       function: {
@@ -129,24 +198,32 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            slotId: { type: 'string' },
-            serviceId: { type: 'string' },
-            petId: { type: 'string' },
-            tutorName: { type: 'string' },
-            petName: { type: 'string' },
-            reason: { type: 'string' },
-            holdMinutes: { type: 'number', minimum: 1, maximum: 60 },
+            slotId: { type: 'string', format: 'uuid' },
+            confirmed: {
+              type: 'boolean',
+              const: true,
+              description: 'Confirma que o tutor escolheu explicitamente este slot.',
+            },
+            serviceId: { type: 'string', format: 'uuid' },
+            petId: { type: 'string', format: 'uuid' },
+            tutorName: { type: 'string', minLength: 1, maxLength: 200 },
+            petName: { type: 'string', minLength: 1, maxLength: 200 },
+            reason: { type: 'string', minLength: 1, maxLength: 1000 },
+            holdMinutes: { type: 'integer', minimum: 1, maximum: 60 },
           },
-          required: ['slotId'],
+          required: ['slotId', 'confirmed'],
+          additionalProperties: false,
         },
       },
     },
     execute: async (args, context) => {
+      const ownership = getAppointmentOwnership(context);
+      if (!ownership) return ownershipFailure();
+
       const result = await reserveSlot({
         slotId: readString(args, 'slotId') || '',
         serviceId: readString(args, 'serviceId'),
-        conversationId: context.conversationId,
-        contactId: context.contactId,
+        ...ownership,
         petId: readString(args, 'petId'),
         tutorName: readString(args, 'tutorName') || context.contactName,
         petName: readString(args, 'petName'),
@@ -154,13 +231,14 @@ const tools: AgentToolDefinition[] = [
         holdMinutes: readNumber(args, 'holdMinutes'),
       });
 
-      if (context.conversationId && result.success && result.appointment) {
-        await setSchedulingState(context.conversationId, {
+      if (result.success && result.appointment) {
+        await setSchedulingState(ownership.conversationId, {
           stage: 'waiting_slot_confirmation',
           appointmentId: result.appointment.id,
           slotId: result.appointment.slotId,
           serviceId: result.appointment.serviceId || undefined,
           petName: result.appointment.petName,
+          contactId: ownership.contactId,
           lastIntent: 'agendamento',
         });
       }
@@ -170,6 +248,7 @@ const tools: AgentToolDefinition[] = [
   },
   {
     name: 'confirm_appointment',
+    validationSchema: agentToolInputSchemas.confirm_appointment,
     schema: {
       type: 'function',
       function: {
@@ -178,14 +257,26 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            appointmentId: { type: 'string' },
+            appointmentId: { type: 'string', format: 'uuid' },
+            confirmed: {
+              type: 'boolean',
+              const: true,
+              description: 'Confirma que o tutor pediu explicitamente esta acao.',
+            },
           },
-          required: ['appointmentId'],
+          required: ['appointmentId', 'confirmed'],
+          additionalProperties: false,
         },
       },
     },
     execute: async (args, context) => {
-      const result = await confirmAppointment({ appointmentId: readString(args, 'appointmentId') || '' });
+      const ownership = getAppointmentOwnership(context);
+      if (!ownership) return ownershipFailure();
+
+      const result = await confirmAppointment({
+        appointmentId: readString(args, 'appointmentId') || '',
+        ...ownership,
+      });
 
       if (context.conversationId && result.success && result.appointment) {
         await setSchedulingState(context.conversationId, {
@@ -194,6 +285,7 @@ const tools: AgentToolDefinition[] = [
           slotId: result.appointment.slotId,
           serviceId: result.appointment.serviceId || undefined,
           petName: result.appointment.petName,
+          contactId: ownership.contactId,
           lastIntent: 'agendamento',
         });
       }
@@ -203,6 +295,7 @@ const tools: AgentToolDefinition[] = [
   },
   {
     name: 'cancel_appointment',
+    validationSchema: agentToolInputSchemas.cancel_appointment,
     schema: {
       type: 'function',
       function: {
@@ -211,17 +304,27 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            appointmentId: { type: 'string' },
-            reason: { type: 'string' },
+            appointmentId: { type: 'string', format: 'uuid' },
+            reason: { type: 'string', minLength: 1, maxLength: 1000 },
+            confirmed: {
+              type: 'boolean',
+              const: true,
+              description: 'Confirma que o tutor pediu explicitamente esta acao.',
+            },
           },
-          required: ['appointmentId'],
+          required: ['appointmentId', 'confirmed'],
+          additionalProperties: false,
         },
       },
     },
     execute: async (args, context) => {
+      const ownership = getAppointmentOwnership(context);
+      if (!ownership) return ownershipFailure();
+
       const result = await cancelAppointment({
         appointmentId: readString(args, 'appointmentId') || '',
         reason: readString(args, 'reason'),
+        ...ownership,
       });
 
       if (context.conversationId && result.success && result.appointment) {
@@ -231,6 +334,7 @@ const tools: AgentToolDefinition[] = [
           slotId: result.appointment.slotId,
           serviceId: result.appointment.serviceId || undefined,
           petName: result.appointment.petName,
+          contactId: ownership.contactId,
           lastIntent: 'cancelamento',
         });
       }
@@ -240,6 +344,7 @@ const tools: AgentToolDefinition[] = [
   },
   {
     name: 'reschedule_appointment',
+    validationSchema: agentToolInputSchemas.reschedule_appointment,
     schema: {
       type: 'function',
       function: {
@@ -248,24 +353,35 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            appointmentId: { type: 'string' },
-            slotId: { type: 'string' },
-            reason: { type: 'string' },
+            appointmentId: { type: 'string', format: 'uuid' },
+            slotId: { type: 'string', format: 'uuid' },
+            reason: { type: 'string', minLength: 1, maxLength: 1000 },
+            confirmed: {
+              type: 'boolean',
+              const: true,
+              description: 'Confirma que o tutor pediu explicitamente esta acao.',
+            },
           },
-          required: ['appointmentId', 'slotId'],
+          required: ['appointmentId', 'slotId', 'confirmed'],
+          additionalProperties: false,
         },
       },
     },
-    execute: (args, context) => rescheduleAppointment({
-      appointmentId: readString(args, 'appointmentId') || '',
-      slotId: readString(args, 'slotId') || '',
-      conversationId: context.conversationId,
-      contactId: context.contactId,
-      reason: readString(args, 'reason'),
-    }),
+    execute: (args, context) => {
+      const ownership = getAppointmentOwnership(context);
+      if (!ownership) return Promise.resolve(ownershipFailure());
+
+      return rescheduleAppointment({
+        appointmentId: readString(args, 'appointmentId') || '',
+        slotId: readString(args, 'slotId') || '',
+        ...ownership,
+        reason: readString(args, 'reason'),
+      });
+    },
   },
   {
     name: 'create_handoff',
+    validationSchema: agentToolInputSchemas.create_handoff,
     schema: {
       type: 'function',
       function: {
@@ -274,23 +390,24 @@ const tools: AgentToolDefinition[] = [
         parameters: {
           type: 'object',
           properties: {
-            triggerType: { type: 'string' },
-            triggerReason: { type: 'string' },
-            summary: { type: 'string' },
-            pendingQuestions: { type: 'array', items: { type: 'string' } },
-            whatWasAnswered: { type: 'string' },
-            whatIsMissing: { type: 'string' },
+            triggerType: { type: 'string', minLength: 1, maxLength: 50 },
+            triggerReason: { type: 'string', minLength: 1, maxLength: 1000 },
+            summary: { type: 'string', minLength: 1, maxLength: 4000 },
+            pendingQuestions: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: 500 } },
+            whatWasAnswered: { type: 'string', minLength: 1, maxLength: 4000 },
+            whatIsMissing: { type: 'string', minLength: 1, maxLength: 4000 },
             riskLevel: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
           },
           required: ['triggerType', 'triggerReason'],
+          additionalProperties: false,
         },
       },
     },
     execute: (args, context) => createHandoff({
       conversationId: context.conversationId || 'unknown',
       contactId: context.contactId,
-      triggerType: readString(args, 'triggerType') || 'agent_tool',
-      triggerReason: readString(args, 'triggerReason') || 'handoff requested',
+      triggerType: readString(args, 'triggerType') || '',
+      triggerReason: readString(args, 'triggerReason') || '',
       summary: readString(args, 'summary'),
       pendingQuestions: readStringArray(args, 'pendingQuestions'),
       whatWasAnswered: readString(args, 'whatWasAnswered'),
@@ -300,6 +417,7 @@ const tools: AgentToolDefinition[] = [
   },
   {
     name: 'notify_sector',
+    validationSchema: agentToolInputSchemas.notify_sector,
     schema: {
       type: 'function',
       function: {
@@ -309,10 +427,16 @@ const tools: AgentToolDefinition[] = [
           type: 'object',
           properties: {
             sector: { type: 'string', enum: ['recepcao', 'clinico', 'gerencia', 'financeiro'] },
-            message: { type: 'string' },
+            message: { type: 'string', minLength: 1, maxLength: 2000 },
             priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'] },
+            confirmed: {
+              type: 'boolean',
+              const: true,
+              description: 'Confirma que a notificacao interna e necessaria.',
+            },
           },
-          required: ['sector', 'message'],
+          required: ['sector', 'message', 'confirmed'],
+          additionalProperties: false,
         },
       },
     },
@@ -344,20 +468,37 @@ export async function executeAgentTool(
     return { success: false, message: `Unknown tool: ${name}` };
   }
 
-  let args: JsonRecord;
+  let parsedArguments: unknown;
   try {
-    args = JSON.parse(rawArguments || '{}') as JsonRecord;
+    parsedArguments = JSON.parse(rawArguments || '{}') as unknown;
   } catch {
     return { success: false, message: 'Tool arguments must be valid JSON' };
   }
 
+  const validation = tool.validationSchema.safeParse(parsedArguments);
+  if (!validation.success) {
+    logger.warn('Agent tool arguments rejected', { toolName: name });
+    return { success: false, message: 'Invalid tool arguments' };
+  }
+
+  if (SCHEDULING_MUTATIONS.has(tool.name) && !getAppointmentOwnership(context)) {
+    return ownershipFailure();
+  }
+  if (
+    USER_AUTHORIZED_MUTATIONS.has(tool.name)
+    && !hasUserAuthorization(tool.name, context.userMessage)
+  ) {
+    logger.warn('Agent tool mutation rejected without user-turn evidence', { toolName: name });
+    return { success: false, message: 'User confirmation is required' };
+  }
+
   try {
-    return await tool.execute(args, context);
+    return await tool.execute(validation.data as JsonRecord, context);
   } catch (error) {
     logger.error('Agent tool execution failed', error as Error, { toolName: name });
     return {
       success: false,
-      message: (error as Error).message,
+      message: 'Tool execution failed',
     };
   }
 }

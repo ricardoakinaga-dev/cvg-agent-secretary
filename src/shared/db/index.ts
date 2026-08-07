@@ -13,6 +13,10 @@ export function getDbPool(): pg.Pool {
       max: config.database.maxConnections,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
+      // PostgreSQL RLS policies read this immutable, validated account scope.
+      // It is configured at connection startup so pooled sessions cannot leak
+      // a tenant selected by a previous request.
+      options: `-c app.tenant_id=${config.chatwoot.accountId}`,
     });
 
     pool.on('error', (err) => {
@@ -61,8 +65,20 @@ export async function getClient(): Promise<pg.PoolClient> {
 
 export async function checkDatabaseConnection(): Promise<boolean> {
   try {
-    const result = await query<{ check: number }>('SELECT 1 as check');
-    return result.rowCount === 1;
+    const result = await query<{ check: number }>(`
+      SELECT CASE WHEN
+        to_regclass('public.conversations') IS NOT NULL AND
+        to_regclass('public.messages') IS NOT NULL AND
+        to_regclass('public.handoffs') IS NOT NULL AND
+        to_regclass('public.knowledge_documents') IS NOT NULL AND
+        to_regclass('public.knowledge_chunks') IS NOT NULL AND
+        to_regclass('public.appointment_services') IS NOT NULL AND
+        to_regclass('public.appointment_providers') IS NOT NULL AND
+        to_regclass('public.appointment_slots') IS NOT NULL AND
+        to_regclass('public.appointments') IS NOT NULL
+      THEN 1 ELSE 0 END AS check
+    `);
+    return result.rowCount === 1 && result.rows[0]?.check === 1;
   } catch (error) {
     logger.error('Database connection check failed', error as Error);
     return false;

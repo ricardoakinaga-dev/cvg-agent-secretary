@@ -2,12 +2,7 @@ import { randomUUID } from 'crypto';
 import { redisClient } from '../../shared/redis';
 import { logger } from '../logging';
 import { aiRouter } from '../ai/router';
-import { chatwootClient } from '../chatwoot/client';
-import { knowledgeRetrievalService } from '../knowledge/retrieval';
 import { analyticsService } from '../analytics/index';
-import { auditService } from '../audit/service';
-import { handoffRepository } from '../handoff/repository';
-import { executeHandoff, getLabelsForIntent } from '../chatwoot/integration';
 import {
   checkGuardrails,
   checkCommercialResponseGuardrails,
@@ -23,291 +18,57 @@ import {
   formatConversationHistory,
   shouldProcessConversation,
   loadContactAndMemories,
-  updateConversationState,
   resetExpiredHandoff,
+  saveConversationContext,
 } from '../conversations/contextLoader';
+import { conversationRepository } from '../conversations/repository';
 import {
   normalizeMessage,
   isRelevantEvent,
   extractConversationMetadata,
   getWebhookMessage,
-  isOutgoingMessage,
 } from '../chatwoot/normalizer';
-import { ChatwootWebhookPayload, AgentResponse, KnowledgeChunk } from '../../shared/types';
-import { IntentClassification } from '../intent/types';
+import { ChatwootWebhookPayload, AgentResponse } from '../../shared/types';
 import { generateContentDedupHash, generateMessageDedupHash } from './dedup';
 import {
-  buildKnowledgeContext,
-  buildServiceAvailabilityResponse,
   buildWalkInServiceResponse,
-  containsSchedulingProposal,
-  hasHoursEvidence,
-  hasPriceEvidence,
-  hasSchedulingPolicyEvidence,
   hasWalkInServiceEvidence,
-  isHoursQuery,
-  isPricingQuery,
-  isSchedulingRequest,
-  isServiceAvailabilityQuery,
 } from '../knowledge/context';
+import {
+  handleOutgoingMessage,
+  looksLikeHumanOperatorMessage,
+  pauseConversationForHumanTakeover,
+} from './humanTakeover';
+import { resolveKnowledge } from './knowledgeResolver';
+import { sendBotMessage } from './messageDelivery';
+import { executeOperationalHandoff } from './operationalHandoff';
+import { sanitizePromptHistory, sanitizePromptMemories } from './promptContext';
+import { advanceContactIntake } from './contactIntake';
+import {
+  enforceSchedulingEvidence,
+  enforceUnansweredHandoff,
+  responseForRequiredHandoff,
+  selectDeterministicResponse,
+} from './responsePolicy';
 
-function createGreetingResponse(): AgentResponse {
-  return {
-    content: 'Olá! Sou a assistente virtual do Centro Veterinário Guarapiranga. Como posso ajudar?',
-    confidence: 1,
-    action: { type: 'respond', content: 'greeting' },
-  };
-}
-
-const NO_ANSWER_HANDOFF_MESSAGE = 'Desculpe, não tenho essa resposta então vou te transferir para um atendente humano.';
-
-const EMERGENCY_HANDOFF_MESSAGE = [
-  'Isso pode ser uma emergência. Venha ao hospital imediatamente para avaliação presencial.',
-  'Vou transferir a conversa para um atendente humano agora para acompanhar seu caso.',
-].join(' ');
-
-function sanitizeHistoryForPrompt(history: string[]): string[] {
-  return history.map((message) => sanitizeForPrompt(message));
-}
-
-function sanitizeMemoriesForPrompt(memories: string[]): string[] {
-  return memories.map((memory) => sanitizeForPrompt(memory));
-}
-
-async function sendBotMessage(conversationId: number, content: string): Promise<void> {
-  await redisClient.markBotOutgoingContent(conversationId, content);
-  const sentMessage = await chatwootClient.sendMessage({
-    conversationId,
-    content,
-  });
-  await redisClient.markBotOutgoingMessageId(sentMessage.id);
-}
-
-function responseForRequiredHandoff(classification: IntentClassification): AgentResponse {
-  if (classification.intent === 'possivel_urgencia') {
-    return {
-      content: EMERGENCY_HANDOFF_MESSAGE,
-      confidence: 1,
-      action: {
-        type: 'handoff',
-        reason: classification.handoffReason || 'Emergência clínica identificada',
-        summary: 'Cliente relatou possível emergência clínica. Orientado a vir imediatamente ao hospital.',
-      },
-    };
-  }
-
-  return {
-    content: classification.intent === 'pedido_humano'
-      ? 'Vou transferir você para um atendente humano para continuar o atendimento.'
-      : NO_ANSWER_HANDOFF_MESSAGE,
-    confidence: classification.confidence,
-    action: {
-      type: 'handoff',
-      reason: classification.handoffReason || 'Atendimento requer humano',
-      summary: 'Conversa transferida para atendimento humano.',
-    },
-  };
-}
-
-function shouldHandoffForUnansweredResponse(agentResponse: AgentResponse): boolean {
-  return agentResponse.confidence < 0.6 || agentResponse.action?.type === 'fallback';
-}
-
-async function executeOperationalHandoff(params: {
-  context: Awaited<ReturnType<typeof loadConversationContext>>;
-  metadata: ReturnType<typeof extractConversationMetadata>;
-  normalizedMessage: NonNullable<ReturnType<typeof normalizeMessage>>;
-  agentResponse: AgentResponse;
-  intentClassification: IntentClassification;
-  riskLevel?: 'high' | 'medium' | 'low';
-  log: ReturnType<typeof logger.child>;
-}): Promise<void> {
-  const {
-    context,
-    metadata,
-    normalizedMessage,
-    agentResponse,
-    intentClassification,
-    riskLevel,
-    log,
-  } = params;
-
-  const action = agentResponse.action;
-  const reason = (action?.type === 'handoff' || action?.type === 'fallback' ? action.reason : undefined)
-    || intentClassification.handoffReason
-    || 'Atendimento requer humano';
-  const summary = (action?.type === 'handoff' ? action.summary : undefined)
-    || 'Conversa transferida para atendimento humano.';
-
-  let handoffId: string | undefined;
-  try {
-    const handoff = await handoffRepository.create({
-      conversationId: context.conversationId,
-      contactId: context.contactId,
-      triggerType: intentClassification.intent === 'possivel_urgencia' ? 'urgency' : 'agent_response',
-      triggerReason: reason,
-      priority: riskLevel === 'high' || intentClassification.priority === 'critical' ? 'high' : 'medium',
-      summary,
-      pendingQuestions: ['Continuar atendimento com humano.'],
-      whatWasAnswered: agentResponse.content,
-      whatIsMissing: summary,
-      riskLevel: riskLevel || intentClassification.riskLevel || 'medium',
-    });
-    handoffId = handoff.id;
-
-    await executeHandoff(
-      context.chatwootConversationId,
-      {
-        contactName: metadata.contactName,
-        conversationHistory: formatConversationHistory(context.messages),
-        whatClientWanted: normalizedMessage.content,
-        informationCollected: {
-          contactId: context.contactId,
-          provider: aiRouter.getPrimaryProvider(),
-        },
-        handoffReason: reason,
-        pendingQuestions: ['Continuar atendimento com humano.'],
-        whatWasAnswered: [agentResponse.content],
-      },
-      getLabelsForIntent(intentClassification.intent, riskLevel || intentClassification.riskLevel)
-    );
-
-    await updateConversationState(context, 'handoff', { reason });
-  } catch (handoffError) {
-    log.error('Operational handoff failed', handoffError as Error, {
-      conversationId: context.conversationId,
-    });
-
-    await analyticsService.trackEvent({
-      eventType: 'error_occurred',
-      conversationId: context.conversationId,
-      contactId: context.contactId,
-      metadata: {
-        errorType: 'handoff_failed',
-        error: (handoffError as Error).message,
-      },
-    });
-  }
-
-  await analyticsService.trackEvent({
-    eventType: 'handoff_triggered',
-    conversationId: context.conversationId,
-    contactId: context.contactId,
-    outcome: 'handoff_to_human',
-    metadata: {
-      reason,
-      summary,
-      handoffId,
-    },
-  });
-
-  await auditService.recordEvent({
-    eventType: 'handoff_triggered',
-    actor: 'system',
-    resourceType: 'conversation',
-    resourceId: context.conversationId,
-    action: 'handoff',
-    details: {
-      reason,
-      contactId: context.contactId,
-      summary,
-      handoffId,
-    },
-  });
-}
-
-function normalizeForTakeoverDetection(content: string): string {
-  return content
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-export function looksLikeHumanOperatorMessage(content: string): boolean {
-  const text = normalizeForTakeoverDetection(content);
-
-  return [
-    /\bsou\s+(?:do|da)\s+centro\s+veterinario\s+guarapiranga\b/,
-    /\baqui\s+(?:e|é)\s+(?:do|da)\s+centro\s+veterinario\s+guarapiranga\b/,
-    /\bcentro\s+veterinario\s+guarapiranga\b.*\b(?:posso|podemos)\s+ajudar\b/,
-    /\b(?:posso|podemos)\s+ajudar\b.*\bcentro\s+veterinario\s+guarapiranga\b/,
-    /\bsou\s+(?:atendente|recepcionista|veterinari[oa])\b/,
-    /\bno\s+que\s+(?:posso|podemos)\s+ajudar\b/,
-  ].some(pattern => pattern.test(text));
-}
-
-async function pauseConversationForHumanTakeover(
-  payload: ChatwootWebhookPayload,
-  log: ReturnType<typeof logger.child>,
-  reason: string
-): Promise<void> {
-  const metadata = extractConversationMetadata(payload);
-  const context = await loadConversationContext(
-    metadata.conversationId,
-    metadata.chatwootConversationId,
-    metadata.contactId,
-    metadata.chatwootContactId,
-    metadata.contactName,
-    metadata.inboxId,
-    metadata.accountId
-  );
-
-  await updateConversationState(context, 'handoff', { reason });
-
-  log.info('Automation paused for human takeover', {
-    conversationId: context.conversationId,
-    chatwootConversationId: context.chatwootConversationId,
-    reason,
-  });
-}
-
-async function handleOutgoingMessage(
-  payload: ChatwootWebhookPayload,
-  log: ReturnType<typeof logger.child>
-): Promise<boolean> {
-  const webhookMessage = getWebhookMessage(payload);
-  if (!isOutgoingMessage(webhookMessage)) {
-    return false;
-  }
-
-  if (webhookMessage.private) {
-    log.info('Private outgoing message skipped');
-    return true;
-  }
-
-  const isKnownBotMessage = await redisClient.isBotOutgoingMessageId(webhookMessage.id);
-  const isPendingBotMessage = await redisClient.consumeBotOutgoingContent(
-    payload.conversation.id,
-    webhookMessage.content || ''
-  );
-
-  if (isKnownBotMessage || isPendingBotMessage) {
-    log.info('Bot outgoing message detected, skipping human takeover', {
-      chatwootMessageId: webhookMessage.id,
-    });
-    return true;
-  }
-
-  await pauseConversationForHumanTakeover(payload, log, 'outgoing_message');
-
-  log.info('Human outgoing message detected, automation paused for conversation', {
-    chatwootMessageId: webhookMessage.id,
-    senderType: webhookMessage.sender.type,
-    senderName: webhookMessage.sender.name,
-  });
-
-  return true;
-}
+export { looksLikeHumanOperatorMessage } from './humanTakeover';
 
 /**
  * Process a Chatwoot webhook event
  */
-export async function processWebhookEvent(payload: ChatwootWebhookPayload): Promise<void> {
+export async function processWebhookEvent(
+  payload: ChatwootWebhookPayload,
+  correlationId: string = randomUUID()
+): Promise<void> {
   const startTime = Date.now();
-  const correlationId = randomUUID();
+  const claimToken = randomUUID();
   const log = logger.child({ correlationId });
+  let messageHash: string | undefined;
+  let contentHash: string | undefined;
+  let messageClaimed = false;
+  let contentClaimed = false;
+  let lockResourceId: string | undefined;
+  let lockAcquired = false;
 
   log.info('Received webhook event', {
     event: payload.event,
@@ -335,6 +96,66 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       chatwootMessageId: normalizedMessage.chatwootMessageId,
     });
 
+    const webhookMessage = getWebhookMessage(payload);
+    if (!webhookMessage) {
+      log.warn('Webhook message missing after relevance check');
+      return;
+    }
+
+    lockResourceId = `runtime:${normalizedMessage.conversationId}`;
+    lockAcquired = await redisClient.acquireLock(lockResourceId, claimToken);
+    if (!lockAcquired) {
+      throw new Error('Conversation is already being processed');
+    }
+
+    messageHash = generateMessageDedupHash(
+      payload.conversation.id,
+      webhookMessage.id,
+      webhookMessage.content
+    );
+
+    const isNewMessage = await redisClient.claimMessageHash(messageHash, claimToken);
+    if (!isNewMessage) {
+      log.info('Duplicate message detected, skipping', { messageHash });
+      return;
+    }
+    messageClaimed = true;
+
+    contentHash = generateContentDedupHash(
+      normalizedMessage.conversationId,
+      normalizedMessage.contactId,
+      normalizedMessage.content
+    );
+
+    const isNewContent = await redisClient.claimContentHash(contentHash, claimToken);
+    if (!isNewContent) {
+      log.info('Duplicate message content detected, skipping', {
+        contentHash,
+        conversationId: normalizedMessage.conversationId,
+        contactId: normalizedMessage.contactId,
+      });
+      return;
+    }
+    contentClaimed = true;
+
+    const metadata = extractConversationMetadata(payload);
+    const persistedConversation = await conversationRepository.upsertConversation({
+      chatwootConversationId: metadata.chatwootConversationId,
+      chatwootContactId: metadata.chatwootContactId,
+      contactName: metadata.contactName,
+      status: metadata.status as 'open' | 'pending' | 'resolved' | 'closed',
+      lastMessageAt: normalizedMessage.timestamp,
+    });
+    await conversationRepository.saveMessage({
+      conversationId: persistedConversation.id,
+      chatwootMessageId: normalizedMessage.chatwootMessageId,
+      content: normalizedMessage.content,
+      messageType: 'incoming',
+      senderType: 'user',
+      senderName: normalizedMessage.senderName,
+      createdAt: normalizedMessage.timestamp,
+    });
+
     if (looksLikeHumanOperatorMessage(normalizedMessage.content)) {
       await pauseConversationForHumanTakeover(payload, log, 'operator_message_pattern');
       log.info('Incoming message looks like human operator reply, skipping bot response', {
@@ -350,51 +171,91 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
         action: inputGuardrail.action,
       });
 
+      const safeResponse = generateFallbackResponse(inputGuardrail.fallbackType || 'security_block');
+
+      if (inputGuardrail.action === 'handoff') {
+        const context = await loadConversationContext(
+          metadata.conversationId,
+          metadata.chatwootConversationId,
+          metadata.contactId,
+          metadata.chatwootContactId,
+          metadata.contactName,
+          metadata.inboxId,
+          metadata.accountId
+        );
+        if (!context.metadata.contactIntake && persistedConversation.contactIntake) {
+          context.metadata.contactIntake = persistedConversation.contactIntake;
+        }
+        await resetExpiredHandoff(context);
+        if (!shouldProcessConversation(context)) {
+          return;
+        }
+        await addMessageToContext(context, normalizedMessage);
+
+        const emergencyClassification = classifyIntent(normalizedMessage.content, {
+          contactName: metadata.contactName,
+        });
+        const agentResponse = emergencyClassification.requiresHandoff
+          ? responseForRequiredHandoff(emergencyClassification)
+          : {
+              content: safeResponse,
+              confidence: 0,
+              action: {
+                type: 'handoff' as const,
+                reason: inputGuardrail.reason || 'Atendimento requer humano',
+                summary: 'Guardrail de entrada determinou transferência imediata.',
+              },
+            };
+
+        await analyticsService.trackEvent({
+          eventType: 'message_received',
+          conversationId: context.conversationId,
+          contactId: context.contactId,
+        });
+        await sendBotMessage(
+          context.chatwootConversationId,
+          persistedConversation.id,
+          agentResponse.content
+        );
+        await analyticsService.trackEvent({
+          eventType: 'response_sent',
+          conversationId: context.conversationId,
+          contactId: context.contactId,
+          latency: Date.now() - startTime,
+          metadata: {
+            confidence: agentResponse.confidence,
+            action: 'handoff',
+          },
+        });
+        await executeOperationalHandoff({
+          context,
+          metadata,
+          normalizedMessage,
+          agentResponse,
+          intentClassification: emergencyClassification,
+          riskLevel: emergencyClassification.riskLevel || 'high',
+          log,
+        });
+        return;
+      }
+
+      await sendBotMessage(
+        metadata.chatwootConversationId,
+        persistedConversation.id,
+        safeResponse
+      );
+
       await analyticsService.trackEvent({
         eventType: 'fallback_triggered',
         conversationId: normalizedMessage.conversationId,
         contactId: normalizedMessage.contactId,
-        outcome: 'failed',
         metadata: {
           reason: 'input_guardrail_blocked',
           guardrailReason: inputGuardrail.reason,
+          delivery: 'safe_response_sent',
         },
       });
 
-      return;
-    }
-
-    const webhookMessage = getWebhookMessage(payload);
-    if (!webhookMessage) {
-      log.warn('Webhook message missing after relevance check');
-      return;
-    }
-
-    const messageHash = generateMessageDedupHash(
-      payload.conversation.id,
-      webhookMessage.id,
-      webhookMessage.content
-    );
-
-    const isNewMessage = await redisClient.setMessageHashIfAbsent(messageHash);
-    if (!isNewMessage) {
-      log.info('Duplicate message detected, skipping', { messageHash });
-      return;
-    }
-
-    const contentHash = generateContentDedupHash(
-      normalizedMessage.conversationId,
-      normalizedMessage.contactId,
-      normalizedMessage.content
-    );
-
-    const isNewContent = await redisClient.setContentHashIfAbsent(contentHash);
-    if (!isNewContent) {
-      log.info('Duplicate message content detected, skipping', {
-        contentHash,
-        conversationId: normalizedMessage.conversationId,
-        contactId: normalizedMessage.contactId,
-      });
       return;
     }
 
@@ -404,7 +265,6 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       contactId: normalizedMessage.contactId,
     });
 
-    const metadata = extractConversationMetadata(payload);
     const context = await loadConversationContext(
       metadata.conversationId,
       metadata.chatwootConversationId,
@@ -414,6 +274,9 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       metadata.inboxId,
       metadata.accountId
     );
+    if (!context.metadata.contactIntake && persistedConversation.contactIntake) {
+      context.metadata.contactIntake = persistedConversation.contactIntake;
+    }
     await resetExpiredHandoff(context);
 
     if (!shouldProcessConversation(context)) {
@@ -432,7 +295,11 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
     );
 
     if (deterministicScheduling.handled && deterministicScheduling.message) {
-      await sendBotMessage(context.chatwootConversationId, deterministicScheduling.message);
+      await sendBotMessage(
+        context.chatwootConversationId,
+        persistedConversation.id,
+        deterministicScheduling.message
+      );
 
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -449,18 +316,21 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       return;
     }
 
-    const conversationHistory = sanitizeHistoryForPrompt(
+    const conversationHistory = sanitizePromptHistory(
       formatConversationHistory(context.messages.slice(0, -1))
     );
-    const intentClassification = classifyIntent(normalizedMessage.content, {
+    let intentClassification = classifyIntent(normalizedMessage.content, {
       conversationHistory,
       contactName: metadata.contactName,
     });
-    const recommendedAction = getRecommendedAction(intentClassification);
 
     if (intentClassification.requiresHandoff) {
       const agentResponse = responseForRequiredHandoff(intentClassification);
-      await sendBotMessage(context.chatwootConversationId, agentResponse.content);
+      await sendBotMessage(
+        context.chatwootConversationId,
+        persistedConversation.id,
+        agentResponse.content
+      );
 
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -490,55 +360,118 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       return;
     }
 
+    const memoryContext = await loadContactAndMemories(
+      metadata.chatwootContactId,
+      metadata.contactName
+    );
+    const intakeDecision = advanceContactIntake({
+      currentState: context.metadata.contactIntake,
+      message: normalizedMessage.content,
+      classification: intentClassification,
+      knownPets: memoryContext.pets.map(pet => ({
+        name: pet.name,
+        species: pet.species,
+      })),
+    });
+    context.metadata.contactIntake = intakeDecision.state;
+    await conversationRepository.updateContactIntake(
+      persistedConversation.id,
+      intakeDecision.state
+    );
+    await saveConversationContext(context);
+
+    if (intakeDecision.status === 'needs_input' && intakeDecision.response) {
+      await sendBotMessage(
+        context.chatwootConversationId,
+        persistedConversation.id,
+        intakeDecision.response
+      );
+      await analyticsService.trackEvent({
+        eventType: 'response_sent',
+        conversationId: context.conversationId,
+        contactId: context.contactId,
+        latency: Date.now() - startTime,
+        metadata: {
+          action: 'contact_intake',
+          stage: intakeDecision.state.stage,
+        },
+      });
+      return;
+    }
+
+    if (intakeDecision.status === 'handoff' && intakeDecision.response) {
+      const intakeClassification = {
+        ...intentClassification,
+        requiresHandoff: true,
+        handoffReason: intakeDecision.handoffReason,
+        priority: 'medium' as const,
+        riskLevel: 'low' as const,
+      };
+      const agentResponse: AgentResponse = {
+        content: intakeDecision.response,
+        confidence: 0,
+        action: {
+          type: 'handoff',
+          reason: intakeDecision.handoffReason || 'Coleta inicial incompleta',
+          summary: 'O contato não conseguiu concluir a identificação e a coleta inicial.',
+        },
+      };
+      await sendBotMessage(
+        context.chatwootConversationId,
+        persistedConversation.id,
+        agentResponse.content
+      );
+      await analyticsService.trackEvent({
+        eventType: 'response_sent',
+        conversationId: context.conversationId,
+        contactId: context.contactId,
+        latency: Date.now() - startTime,
+        metadata: {
+          confidence: agentResponse.confidence,
+          action: 'handoff',
+          stage: intakeDecision.state.stage,
+        },
+      });
+      await executeOperationalHandoff({
+        context,
+        metadata,
+        normalizedMessage,
+        agentResponse,
+        intentClassification: intakeClassification,
+        riskLevel: 'low',
+        log,
+      });
+      return;
+    }
+
+    if (
+      (intentClassification.intent === 'saudacao'
+        || intentClassification.intent === 'desconhecido')
+      && intakeDecision.useRetainedReason
+      && intakeDecision.state.contactReason
+    ) {
+      intentClassification = classifyIntent(intakeDecision.state.contactReason, {
+        conversationHistory,
+        contactName: metadata.contactName,
+      });
+    }
+    const recommendedAction = getRecommendedAction(intentClassification);
+
     log.info('Runtime intent decision', {
       intent: intentClassification.intent,
       confidence: intentClassification.confidence,
       shouldUseKnowledge: recommendedAction.shouldUseKnowledge,
     });
 
-    const memoryContext = await loadContactAndMemories(
-      metadata.chatwootContactId,
-      metadata.contactName
-    );
-
-    let knowledgeResults: KnowledgeChunk[] = [];
-    if (recommendedAction.shouldUseKnowledge) {
-      try {
-        const knowledgeSearchResults = await knowledgeRetrievalService.search({
-          query: normalizedMessage.content,
-          limit: 3,
-          minRelevance: 0.7,
-        });
-
-        const rawKnowledgeResults = knowledgeSearchResults.map(r => ({
-          id: r.id,
-          content: r.content,
-          source: r.source,
-          relevance: r.relevance,
-          category: r.category,
-          title: r.title,
-        }));
-        knowledgeResults = buildKnowledgeContext(normalizedMessage.content, rawKnowledgeResults);
-
-        logger.info('Knowledge search completed', {
-          resultsCount: knowledgeResults.length,
-          pricingQuery: isPricingQuery(normalizedMessage.content),
-          hasPriceEvidence: hasPriceEvidence(knowledgeResults),
-          hoursQuery: isHoursQuery(normalizedMessage.content),
-          hasHoursEvidence: hasHoursEvidence(knowledgeResults),
-        });
-      } catch (knowledgeError) {
-        logger.error('Knowledge search failed', knowledgeError as Error, {});
-      }
-    } else {
-      logger.info('Knowledge search skipped by intent decision', {
-        intent: intentClassification.intent,
-      });
-    }
+    const knowledgeResults = await resolveKnowledge({
+      query: intakeDecision.knowledgeQuery || normalizedMessage.content,
+      intent: intentClassification.intent,
+      shouldUseKnowledge: recommendedAction.shouldUseKnowledge,
+    });
 
     if (hasWalkInServiceEvidence(normalizedMessage.content, knowledgeResults)) {
       const content = buildWalkInServiceResponse(normalizedMessage.content, knowledgeResults);
-      await sendBotMessage(context.chatwootConversationId, content);
+      await sendBotMessage(context.chatwootConversationId, persistedConversation.id, content);
 
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -561,7 +494,7 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
     const schedulingState = await markSchedulingIntent(
       context.conversationId,
       intentClassification.intent,
-      intentClassification.entities.petName
+      intentClassification.entities.petName || intakeDecision.state.petName
     );
 
     const agentContext = {
@@ -570,37 +503,32 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       schedulingState,
       contactName: metadata.contactName,
       conversationHistory,
-      memories: sanitizeMemoriesForPrompt(memoryContext.memories as string[]),
+      memories: sanitizePromptMemories(memoryContext.memories as string[]),
       pets: memoryContext.pets,
       knowledge: knowledgeResults,
+      contactIntake: intakeDecision.state.contactRole && intakeDecision.state.contactReason
+        ? {
+            contactRole: intakeDecision.state.contactRole,
+            contactReason: intakeDecision.state.contactReason,
+          }
+        : undefined,
     };
-    const safeUserMessage = sanitizeForPrompt(normalizedMessage.content);
+    const safeUserMessage = sanitizeForPrompt(
+      intakeDecision.useRetainedReason && intakeDecision.state.contactReason
+        ? intakeDecision.state.contactReason
+        : normalizedMessage.content
+    );
 
     const contextWithContact = context as typeof context & { contactId: string };
     contextWithContact.contactId = memoryContext.contactId ?? context.contactId;
 
-    let agentResponse: AgentResponse;
-    if (intentClassification.intent === 'saudacao') {
-      agentResponse = createGreetingResponse();
-    } else if (recommendedAction.shouldUseKnowledge && knowledgeResults.length === 0) {
-      agentResponse = {
-        content: generateFallbackResponse('no_knowledge'),
-        confidence: 0,
-        action: { type: 'fallback', reason: 'knowledge_not_found' },
-      };
-    } else if (isPricingQuery(normalizedMessage.content) && !hasPriceEvidence(knowledgeResults)) {
-      agentResponse = {
-        content: generateFallbackResponse('no_knowledge'),
-        confidence: 0,
-        action: { type: 'fallback', reason: 'pricing_without_knowledge' },
-      };
-    } else if (isHoursQuery(normalizedMessage.content) && !hasHoursEvidence(knowledgeResults)) {
-      agentResponse = {
-        content: generateFallbackResponse('no_knowledge'),
-        confidence: 0,
-        action: { type: 'fallback', reason: 'hours_without_knowledge' },
-      };
-    } else {
+    let agentResponse = selectDeterministicResponse({
+      message: normalizedMessage.content,
+      classification: intentClassification,
+      shouldUseKnowledge: recommendedAction.shouldUseKnowledge,
+      knowledge: knowledgeResults,
+    });
+    if (!agentResponse) {
       log.info('Calling AI', { contactName: metadata.contactName, provider: aiRouter.getPrimaryProvider() });
 
       try {
@@ -634,28 +562,12 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       }
     }
 
-    if (
-      containsSchedulingProposal(agentResponse.content)
-      && !hasSchedulingPolicyEvidence(knowledgeResults)
-    ) {
-      if (isServiceAvailabilityQuery(normalizedMessage.content) && !isSchedulingRequest(normalizedMessage.content)) {
-        agentResponse = {
-          content: buildServiceAvailabilityResponse(normalizedMessage.content, knowledgeResults),
-          confidence: 0.9,
-          action: { type: 'respond', content: 'institutional_service_info' },
-        };
-      } else if (intentClassification.intent === 'agendamento') {
-        agentResponse = {
-          content: 'Para evitar informação incorreta, preciso confirmar a forma de atendimento e disponibilidade desse serviço com um atendente humano.',
-          confidence: 0,
-          action: {
-            type: 'handoff',
-            reason: 'Agendamento sem evidência institucional ou agenda confiável',
-            summary: 'Tutor pediu agendamento, mas a base recuperada não confirmou que o serviço é agendável.',
-          },
-        };
-      }
-    }
+    agentResponse = enforceSchedulingEvidence({
+      message: normalizedMessage.content,
+      classification: intentClassification,
+      knowledge: knowledgeResults,
+      response: agentResponse,
+    });
 
     const responseGuardrail = checkResponseGuardrails(agentResponse.content);
     const commercialGuardrail = checkCommercialResponseGuardrails(
@@ -687,31 +599,7 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       });
     }
 
-    if (
-      agentResponse.action?.type !== 'handoff'
-      && shouldHandoffForUnansweredResponse(agentResponse)
-      && agentResponse.action?.type !== 'respond'
-    ) {
-      agentResponse = {
-        content: NO_ANSWER_HANDOFF_MESSAGE,
-        confidence: agentResponse.confidence,
-        action: {
-          type: 'handoff',
-          reason: agentResponse.action?.reason || 'Resposta com baixa confiança',
-          summary: 'O bot não encontrou uma resposta adequada e transferiu para atendimento humano.',
-        },
-      };
-    } else if (agentResponse.confidence < 0.6 && agentResponse.action?.type !== 'handoff') {
-      agentResponse = {
-        content: NO_ANSWER_HANDOFF_MESSAGE,
-        confidence: agentResponse.confidence,
-        action: {
-          type: 'handoff',
-          reason: 'Resposta com baixa confiança',
-          summary: 'O bot não teve confiança suficiente para resolver a solicitação.',
-        },
-      };
-    }
+    agentResponse = enforceUnansweredHandoff(agentResponse);
 
     log.info('Agent response generated', {
       contentLength: agentResponse.content.length,
@@ -719,7 +607,11 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
     });
 
     try {
-      await sendBotMessage(context.chatwootConversationId, agentResponse.content);
+      await sendBotMessage(
+        context.chatwootConversationId,
+        persistedConversation.id,
+        agentResponse.content
+      );
 
       log.info('Response sent to Chatwoot');
 
@@ -748,15 +640,21 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
     } catch (error) {
       log.error('Failed to send response to Chatwoot', error as Error);
 
-      await analyticsService.trackEvent({
-        eventType: 'error_occurred',
-        conversationId: context.conversationId,
-        contactId: context.contactId,
-        metadata: {
-          errorType: 'chatwoot_send_failed',
-          error: (error as Error).message,
-        },
-      });
+      try {
+        await analyticsService.trackEvent({
+          eventType: 'error_occurred',
+          conversationId: context.conversationId,
+          contactId: context.contactId,
+          metadata: {
+            errorType: 'chatwoot_send_failed',
+            error: (error as Error).message,
+          },
+        });
+      } catch (metricsError) {
+        log.error('Failed to record Chatwoot send error metric', metricsError as Error);
+      }
+
+      throw error;
     }
 
     log.info('Webhook processing completed', {
@@ -764,8 +662,33 @@ export async function processWebhookEvent(payload: ChatwootWebhookPayload): Prom
       conversationId: context.conversationId,
     });
   } catch (error) {
+    const releases: Promise<unknown>[] = [];
+    if (contentClaimed && contentHash) {
+      releases.push(redisClient.releaseContentHash(contentHash, claimToken));
+    }
+    if (messageClaimed && messageHash) {
+      releases.push(redisClient.releaseMessageHash(messageHash, claimToken));
+    }
+
+    const releaseResults = await Promise.allSettled(releases);
+    for (const result of releaseResults) {
+      if (result.status === 'rejected') {
+        log.error('Failed to release runtime dedup claim', result.reason as Error);
+      }
+    }
+
     log.error('Error processing webhook', error as Error);
     throw error;
+  } finally {
+    if (lockAcquired && lockResourceId) {
+      try {
+        await redisClient.releaseLock(lockResourceId, claimToken);
+      } catch (lockError) {
+        log.error('Failed to release conversation runtime lock', lockError as Error, {
+          lockResourceId,
+        });
+      }
+    }
   }
 }
 
@@ -789,6 +712,12 @@ export async function processConversationCreated(payload: ChatwootWebhookPayload
   });
 
   const metadata = extractConversationMetadata(payload);
+  await conversationRepository.upsertConversation({
+    chatwootConversationId: metadata.chatwootConversationId,
+    chatwootContactId: metadata.chatwootContactId,
+    contactName: metadata.contactName,
+    status: metadata.status as 'open' | 'pending' | 'resolved' | 'closed',
+  });
   await analyticsService.trackEvent({
     eventType: 'conversation_started',
     conversationId: metadata.conversationId,

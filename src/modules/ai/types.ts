@@ -1,5 +1,8 @@
+import type { ContactRole } from '../../shared/types';
+
+/** Stable boundary implemented by every model adapter and consumed by AIRouter. */
 export interface AIProvider {
-  name: string;
+  readonly name: string;
   generate(input: GenerateInput): Promise<GenerateOutput>;
   embed?(text: string): Promise<number[]>;
   healthCheck(): Promise<boolean>;
@@ -31,6 +34,10 @@ export interface AgentContext {
     category?: string;
     title?: string;
   }>;
+  contactIntake?: {
+    contactRole: ContactRole;
+    contactReason: string;
+  };
 }
 
 export interface GenerateOutput {

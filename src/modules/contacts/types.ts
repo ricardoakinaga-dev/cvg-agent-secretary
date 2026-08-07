@@ -2,6 +2,7 @@
 
 export interface Contact {
   id: string;
+  tenantId: string;
   chatwootId: number | null;
   name: string;
   email: string | null;
@@ -59,6 +60,7 @@ export interface ContactSearchInput {
 // DB row type (snake_case from PostgreSQL)
 export interface ContactRow {
   id: string;
+  tenant_id: string;
   chatwoot_id: number | null;
   name: string;
   email: string | null;
@@ -71,6 +73,12 @@ export interface ContactRow {
   cpf: string | null;
   preferred_channel: string;
   notes: string | null;
+  pii_encrypted?: Partial<Record<string, string | null>> | string | null;
+  name_lookup?: string | null;
+  email_lookup?: string | null;
+  phone_lookup?: string | null;
+  whatsapp_lookup?: string | null;
+  cpf_lookup?: string | null;
   created_at: Date;
   updated_at: Date;
   deleted_at: Date | null;
@@ -80,6 +88,7 @@ export interface ContactRow {
 export function mapRowToContact(row: ContactRow): Contact {
   return {
     id: row.id,
+    tenantId: row.tenant_id,
     chatwootId: row.chatwoot_id,
     name: row.name,
     email: row.email,

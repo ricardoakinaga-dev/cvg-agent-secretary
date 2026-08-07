@@ -1,12 +1,12 @@
 // Tests for Intent Classifier - Phase 4
 
-jest.mock('../../src/modules/logging', () => ({
+vi.mock('../../src/modules/logging', () => ({
   logger: {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-    child: jest.fn().mockReturnThis(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn().mockReturnThis(),
   },
 }));
 
@@ -188,6 +188,11 @@ describe('Intent Classifier', () => {
     it('should extract pet species', () => {
       const result = classifyIntent('Meu gato está doente');
       expect(result.entities.petSpecies).toBe('gato');
+    });
+
+    it('should not mistake a verb for the pet name', () => {
+      const result = classifyIntent('Meu pet está vomitando');
+      expect(result.entities.petName).toBeUndefined();
     });
 
     it('should extract service type', () => {

@@ -119,6 +119,38 @@ describe('Intent Classifier', () => {
       expect(result.intent).toBe('duvida_clinica');
     });
 
+    it('should detect common symptom follow-up as clinical question', () => {
+      const result = classifyIntent('Ele está com diarréia');
+
+      expect(result.intent).toBe('duvida_clinica');
+      expect(getRecommendedAction(result).shouldUseKnowledge).toBe(true);
+    });
+
+    it('should classify sick pet consultation requests as clinical, not generic services', () => {
+      const result = classifyIntent('Meu cão está doente e preciso passar com ele em consulta');
+
+      expect(result.intent).toBe('duvida_clinica');
+      expect(result.intent).not.toBe('servicos');
+      expect(result.detectedKeywords).toContain('duvida_clinica');
+      expect(getRecommendedAction(result).shouldUseKnowledge).toBe(true);
+    });
+
+    it('classifies a pet consultation request with a joined-word typo as clinical', () => {
+      const result = classifyIntent('Estou com meu cachorro e preciso passar emnconsulta');
+
+      expect(result.intent).toBe('duvida_clinica');
+      expect(result.requiresHandoff).toBe(false);
+    });
+
+    it('should use Portuguese unknown label and keep knowledge enabled for ambiguous messages', () => {
+      const result = classifyIntent('isso aí');
+      const action = getRecommendedAction(result);
+
+      expect(result.intent).toBe('desconhecido');
+      expect(result.intent).not.toBe('不明');
+      expect(action.shouldUseKnowledge).toBe(true);
+    });
+
     it('should extract phone number from message', () => {
       const result = classifyIntent('meu pet está doente, liga no 11999999999');
       

@@ -1,20 +1,36 @@
 const mockQuery = vi.hoisted(() => vi.fn());
+const mockClient = vi.hoisted(() => ({
+  query: vi.fn(),
+  release: vi.fn(),
+}));
+const mockGetClient = vi.hoisted(() => vi.fn());
 const mockAudit = vi.hoisted(() => ({
   recordEvent: vi.fn(),
 }));
-const mockCreateChunksForDocument = vi.hoisted(() => vi.fn());
+const mockPrepareChunksForDocument = vi.hoisted(() => vi.fn());
+const mockIndexChunksInVectorStore = vi.hoisted(() => vi.fn());
 
 vi.mock('../../src/shared/db', () => ({
   query: mockQuery,
+  getClient: mockGetClient,
 }));
 vi.mock('../../src/modules/audit/service', () => ({
   auditService: mockAudit,
+  assertAuditPrincipal: vi.fn(),
 }));
 vi.mock('../../src/modules/knowledge/pipeline', () => ({
-  createChunksForDocument: mockCreateChunksForDocument,
+  prepareChunksForDocument: mockPrepareChunksForDocument,
+  indexChunksInVectorStore: mockIndexChunksInVectorStore,
 }));
 
 import { knowledgeRepository } from '../../src/modules/knowledge/repository';
+import type { AuditPrincipal } from '../../src/modules/audit/service';
+
+const managerPrincipal = {
+  id: 'manager-1',
+  role: 'manager',
+  source: 'signed_identity',
+} as AuditPrincipal;
 
 function row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -63,6 +79,8 @@ function chunkRow(overrides: Record<string, unknown> = {}): Record<string, unkno
 describe('knowledge repository review workflow', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetClient.mockResolvedValue(mockClient);
+    mockIndexChunksInVectorStore.mockResolvedValue(undefined);
   });
 
   it('creates draft documents with safe defaults', async () => {
@@ -78,6 +96,7 @@ describe('knowledge repository review workflow', () => {
     expect(mockQuery).toHaveBeenCalledWith(
       expect.stringContaining('INSERT INTO knowledge_documents'),
       [
+        '1',
         'Vacinas',
         'Conteudo sobre vacinas',
         'faq',
@@ -125,6 +144,7 @@ describe('knowledge repository review workflow', () => {
     expect(mockQuery).toHaveBeenCalledWith(
       expect.stringContaining('UPDATE knowledge_documents'),
       [
+        '1',
         'Vacinas atualizadas',
         'Novo conteudo',
         'procedure',
@@ -176,7 +196,8 @@ describe('knowledge repository review workflow', () => {
     expect(byCategory).toHaveLength(1);
     expect(published[0].status).toBe('published');
     expect(filtered[0].category).toBe('service');
-    expect(mockQuery).toHaveBeenLastCalledWith(expect.stringContaining('LIMIT $3'), [
+    expect(mockQuery).toHaveBeenLastCalledWith(expect.stringContaining('LIMIT $4'), [
+      '1',
       'pending_review',
       'service',
       10,
@@ -193,7 +214,7 @@ describe('knowledge repository review workflow', () => {
     expect(document.status).toBe('pending_review');
     expect(mockQuery).toHaveBeenLastCalledWith(
       expect.stringContaining('UPDATE knowledge_documents'),
-      ['pending_review', 'doc-1']
+      ['1', 'pending_review', 'doc-1']
     );
   });
 
@@ -208,36 +229,49 @@ describe('knowledge repository review workflow', () => {
   });
 
   it('approves only pending review documents and records audit', async () => {
-    mockQuery
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [row({ status: 'pending_review' })] })
-      .mockResolvedValueOnce({ rows: [row({ status: 'approved', approved_by: 'manager-1' })] });
+      .mockResolvedValueOnce({ rows: [row({ status: 'approved', approved_by: 'manager-1' })] })
+      .mockResolvedValueOnce({ rows: [] });
 
-    const document = await knowledgeRepository.approveDocument('doc-1', 'manager-1');
+    const document = await knowledgeRepository.approveDocument('doc-1', managerPrincipal);
 
     expect(document.status).toBe('approved');
     expect(document.approvedBy).toBe('manager-1');
     expect(mockAudit.recordEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'knowledge_updated',
       actor: 'manager-1',
+      actorSource: 'signed_identity',
       action: 'approve',
       resourceId: 'doc-1',
-    }));
+      idempotencyKey: expect.stringContaining('knowledge:doc-1:approve:'),
+      details: { category: 'faq', status: 'approved', version: 1 },
+    }), mockClient);
+    expect(mockClient.query).toHaveBeenLastCalledWith('COMMIT');
   });
 
   it('rejects approval when document is missing or in wrong status', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    await expect(knowledgeRepository.approveDocument('missing', 'manager-1')).rejects.toThrow(
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(knowledgeRepository.approveDocument('missing', managerPrincipal)).rejects.toThrow(
       'Document not found: missing'
     );
 
-    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'draft' })] });
-    await expect(knowledgeRepository.approveDocument('doc-1', 'manager-1')).rejects.toThrow(
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row({ status: 'draft' })] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(knowledgeRepository.approveDocument('doc-1', managerPrincipal)).rejects.toThrow(
       'Document must be pending_review before approval: draft'
     );
   });
 
   it('rejects reviewed documents and stores rejection metadata', async () => {
-    mockQuery
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [row({ status: 'pending_review' })] })
       .mockResolvedValueOnce({
         rows: [
@@ -249,28 +283,38 @@ describe('knowledge repository review workflow', () => {
             },
           }),
         ],
-      });
+      })
+      .mockResolvedValueOnce({ rows: [] });
 
-    const document = await knowledgeRepository.rejectDocument('doc-1', 'manager-1', 'Preco desatualizado');
+    const document = await knowledgeRepository.rejectDocument('doc-1', managerPrincipal, 'Preco desatualizado');
 
     expect(document.status).toBe('rejected');
     expect(document.metadata.rejectionReason).toBe('Preco desatualizado');
     expect(mockAudit.recordEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'knowledge_rejected',
       actor: 'manager-1',
+      actorSource: 'signed_identity',
       action: 'reject',
       resourceId: 'doc-1',
-    }));
+      idempotencyKey: expect.stringContaining('knowledge:doc-1:reject:'),
+      details: { category: 'faq', status: 'rejected', version: 1 },
+    }), mockClient);
   });
 
   it('rejects rejection when document is missing or already published', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [] });
-    await expect(knowledgeRepository.rejectDocument('missing', 'manager-1')).rejects.toThrow(
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(knowledgeRepository.rejectDocument('missing', managerPrincipal)).rejects.toThrow(
       'Document not found: missing'
     );
 
-    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'published' })] });
-    await expect(knowledgeRepository.rejectDocument('doc-1', 'manager-1')).rejects.toThrow(
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row({ status: 'published' })] })
+      .mockResolvedValueOnce({ rows: [] });
+    await expect(knowledgeRepository.rejectDocument('doc-1', managerPrincipal)).rejects.toThrow(
       'Document cannot be rejected from status: published'
     );
   });
@@ -278,72 +322,169 @@ describe('knowledge repository review workflow', () => {
   it('does not publish documents before approval', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'pending_review' })] });
 
-    await expect(knowledgeRepository.publishDocument('doc-1', 'manager-1'))
+    await expect(knowledgeRepository.publishDocument('doc-1', managerPrincipal))
       .rejects
       .toThrow('Document must be approved before publication');
 
-    expect(mockCreateChunksForDocument).not.toHaveBeenCalled();
+    expect(mockPrepareChunksForDocument).not.toHaveBeenCalled();
   });
 
   it('does not publish missing documents', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
-    await expect(knowledgeRepository.publishDocument('missing', 'manager-1')).rejects.toThrow(
+    await expect(knowledgeRepository.publishDocument('missing', managerPrincipal)).rejects.toThrow(
       'Document not found: missing'
     );
   });
 
-  it('throws when publication update finds no document', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [row({ status: 'approved' })] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] });
+  it('rolls back when publication update finds no document', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'approved' })] });
+    mockPrepareChunksForDocument.mockResolvedValue([
+      {
+        documentId: 'doc-1',
+        chunkIndex: 0,
+        content: 'Conteudo sobre vacinas',
+        category: 'faq',
+        version: 2,
+      },
+    ]);
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [row({ status: 'approved' })] }) // lock
+      .mockResolvedValueOnce({ rows: [] }) // deactivate current chunks
+      .mockResolvedValueOnce({ rows: [chunkRow({ version: 2 })] }) // insert chunk
+      .mockResolvedValueOnce({ rows: [] }) // deactivate old chunks
+      .mockResolvedValueOnce({ rows: [] }) // deactivate old documents
+      .mockResolvedValueOnce({ rows: [] }) // publish
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
 
-    await expect(knowledgeRepository.publishDocument('doc-1', 'manager-1')).rejects.toThrow(
+    await expect(knowledgeRepository.publishDocument('doc-1', managerPrincipal)).rejects.toThrow(
       'Document not found: doc-1'
     );
+    expect(mockClient.query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(mockIndexChunksInVectorStore).not.toHaveBeenCalled();
   });
 
-  it('publishes approved documents and creates chunks', async () => {
+  it('publishes approved documents and swaps versions in one transaction', async () => {
     const publishedRow = row({
       status: 'published',
       approved_by: 'manager-1',
       version: 2,
     });
 
-    mockQuery
-      .mockResolvedValueOnce({ rows: [row({ status: 'approved' })] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [publishedRow] });
-    mockCreateChunksForDocument.mockResolvedValue(undefined);
+    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'approved' })] });
+    mockPrepareChunksForDocument.mockResolvedValue([
+      {
+        documentId: 'doc-1',
+        chunkIndex: 0,
+        content: 'Conteudo sobre vacinas',
+        category: 'faq',
+        version: 2,
+      },
+    ]);
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [row({ status: 'approved' })] }) // lock
+      .mockResolvedValueOnce({ rows: [] }) // deactivate current chunks
+      .mockResolvedValueOnce({ rows: [chunkRow({ version: 2 })] }) // insert chunk
+      .mockResolvedValueOnce({ rows: [] }) // deactivate old chunks
+      .mockResolvedValueOnce({ rows: [] }) // deactivate old documents
+      .mockResolvedValueOnce({ rows: [publishedRow] }) // publish
+      .mockResolvedValueOnce({ rows: [] }); // COMMIT
 
-    const document = await knowledgeRepository.publishDocument('doc-1', 'manager-1');
+    const document = await knowledgeRepository.publishDocument('doc-1', managerPrincipal);
 
     expect(document.status).toBe('published');
-    expect(mockCreateChunksForDocument).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mockPrepareChunksForDocument).toHaveBeenCalledWith(expect.objectContaining({
       id: 'doc-1',
       status: 'published',
+      version: 2,
     }));
+    expect(mockClient.query).toHaveBeenNthCalledWith(1, 'BEGIN');
+    expect(mockClient.query).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE knowledge_chunks'),
+      ['1', 'doc-1', 'Vacinas']
+    );
+    expect(mockClient.query).toHaveBeenLastCalledWith('COMMIT');
+    expect(mockClient.release).toHaveBeenCalledOnce();
+    expect(mockIndexChunksInVectorStore).toHaveBeenCalledAfter(
+      mockClient.query as ReturnType<typeof vi.fn>
+    );
     expect(mockAudit.recordEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'knowledge_published',
       actor: 'manager-1',
+      actorSource: 'signed_identity',
       action: 'publish',
-    }));
+      idempotencyKey: 'knowledge:doc-1:publish:2',
+      details: { category: 'faq', status: 'published', version: 2 },
+    }), mockClient);
   });
 
-  it('still publishes when chunk generation fails', async () => {
-    mockQuery
+  it('does not publish or deactivate previous versions when chunk generation fails', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'approved' })] });
+    mockPrepareChunksForDocument.mockRejectedValue(new Error('chunking failed'));
+
+    await expect(knowledgeRepository.publishDocument('doc-1', managerPrincipal)).rejects.toThrow(
+      'chunking failed'
+    );
+
+    expect(mockGetClient).not.toHaveBeenCalled();
+    expect(mockAudit.recordEvent).not.toHaveBeenCalled();
+  });
+
+  it('rolls back publication when chunk persistence fails', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'approved' })] });
+    mockPrepareChunksForDocument.mockResolvedValue([
+      {
+        documentId: 'doc-1',
+        chunkIndex: 0,
+        content: 'Conteudo sobre vacinas',
+        category: 'faq',
+        version: 2,
+      },
+    ]);
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] }) // BEGIN
+      .mockResolvedValueOnce({ rows: [row({ status: 'approved' })] }) // lock
+      .mockResolvedValueOnce({ rows: [] }) // deactivate current chunks
+      .mockRejectedValueOnce(new Error('chunk insert failed'))
+      .mockResolvedValueOnce({ rows: [] }); // ROLLBACK
+
+    await expect(knowledgeRepository.publishDocument('doc-1', managerPrincipal)).rejects.toThrow(
+      'chunk insert failed'
+    );
+
+    expect(mockClient.query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(mockIndexChunksInVectorStore).not.toHaveBeenCalled();
+    expect(mockAudit.recordEvent).not.toHaveBeenCalled();
+  });
+
+  it('rolls back publication when its durable audit event cannot be written', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [row({ status: 'approved' })] });
+    mockPrepareChunksForDocument.mockResolvedValue([{
+      documentId: 'doc-1',
+      chunkIndex: 0,
+      content: 'Conteudo sobre vacinas',
+      category: 'faq',
+      version: 2,
+    }]);
+    mockAudit.recordEvent.mockRejectedValueOnce(new Error('audit unavailable'));
+    mockClient.query
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [row({ status: 'approved' })] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [row({ status: 'published', version: 2 })] });
-    mockCreateChunksForDocument.mockRejectedValue(new Error('embedding failed'));
+      .mockResolvedValueOnce({ rows: [chunkRow({ version: 2 })] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [row({ status: 'published', version: 2 })] })
+      .mockResolvedValueOnce({ rows: [] });
 
-    const document = await knowledgeRepository.publishDocument('doc-1', 'manager-1');
+    await expect(knowledgeRepository.publishDocument('doc-1', managerPrincipal))
+      .rejects
+      .toThrow('audit unavailable');
 
-    expect(document.status).toBe('published');
-    expect(mockAudit.recordEvent).toHaveBeenCalledWith(expect.objectContaining({
-      eventType: 'knowledge_published',
-    }));
+    expect(mockClient.query).toHaveBeenLastCalledWith('ROLLBACK');
+    expect(mockIndexChunksInVectorStore).not.toHaveBeenCalled();
   });
 
   it('creates chunks and batches multiple chunk creations', async () => {
@@ -377,6 +518,7 @@ describe('knowledge repository review workflow', () => {
       1,
       expect.stringContaining('INSERT INTO knowledge_chunks'),
       [
+        '1',
         'doc-1',
         0,
         'Conteudo sobre vacinas',
@@ -394,6 +536,7 @@ describe('knowledge repository review workflow', () => {
       2,
       expect.stringContaining('INSERT INTO knowledge_chunks'),
       [
+        '1',
         'doc-1',
         1,
         'Segundo chunk',
@@ -419,6 +562,16 @@ describe('knowledge repository review workflow', () => {
 
     expect(byDocument[0].id).toBe('chunk-1');
     expect(allActive[0].id).toBe('chunk-2');
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/JOIN knowledge_documents[\s\S]*status = 'published'/),
+      ['1', 'doc-1']
+    );
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      2,
+      expect.stringMatching(/JOIN knowledge_documents[\s\S]*status = 'published'/),
+      ['1']
+    );
   });
 
   it('searches chunks using PostgreSQL full-text with and without category', async () => {
@@ -434,10 +587,16 @@ describe('knowledge repository review workflow', () => {
 
     expect(general[0].id).toBe('chunk-1');
     expect(categorized[0].category).toBe('service');
-    expect(mockQuery).toHaveBeenNthCalledWith(1, expect.stringContaining('LIMIT 3'), ['vacina']);
-    expect(mockQuery).toHaveBeenNthCalledWith(2, expect.stringContaining('AND category = $2'), [
+    expect(mockQuery).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/JOIN knowledge_documents[\s\S]*kd\.is_active = true[\s\S]*kd\.status = 'published'[\s\S]*LIMIT \$3/),
+      ['1', 'vacina', 3]
+    );
+    expect(mockQuery).toHaveBeenNthCalledWith(2, expect.stringContaining('AND kc.category = $3'), [
+      '1',
       'horario',
       'service',
+      5,
     ]);
   });
 
@@ -446,6 +605,6 @@ describe('knowledge repository review workflow', () => {
 
     await knowledgeRepository.deleteChunksByDocument('doc-1');
 
-    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE knowledge_chunks'), ['doc-1']);
+    expect(mockQuery).toHaveBeenCalledWith(expect.stringContaining('UPDATE knowledge_chunks'), ['1', 'doc-1']);
   });
 });

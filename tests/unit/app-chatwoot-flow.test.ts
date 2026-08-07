@@ -1,6 +1,6 @@
 import http from 'http';
 import { AddressInfo } from 'net';
-import { createHmac } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 import { ChatwootWebhookPayload, ConversationContext } from '../../src/shared/types';
 
 const mockRedis = vi.hoisted(() => ({
@@ -9,6 +9,12 @@ const mockRedis = vi.hoisted(() => ({
   setMessageHash: vi.fn(),
   setMessageHashIfAbsent: vi.fn(),
   setContentHashIfAbsent: vi.fn(),
+  claimMessageHash: vi.fn(),
+  releaseMessageHash: vi.fn(),
+  claimContentHash: vi.fn(),
+  releaseContentHash: vi.fn(),
+  acquireLock: vi.fn(),
+  releaseLock: vi.fn(),
   markBotOutgoingContent: vi.fn(),
   markBotOutgoingMessageId: vi.fn(),
   isBotOutgoingMessageId: vi.fn(),
@@ -48,6 +54,7 @@ const mockContextLoader = vi.hoisted(() => ({
   formatConversationHistory: vi.fn(() => []),
   shouldProcessConversation: vi.fn(() => true),
   loadContactAndMemories: vi.fn(),
+  saveConversationContext: vi.fn(),
   updateConversationState: vi.fn(),
   resetExpiredHandoff: vi.fn(),
 }));
@@ -55,6 +62,16 @@ const mockContextLoader = vi.hoisted(() => ({
 const mockSchedulingState = vi.hoisted(() => ({
   handleSchedulingStateMachine: vi.fn(),
   markSchedulingIntent: vi.fn(),
+}));
+
+const mockWebhookWorker = vi.hoisted(() => ({
+  enqueue: vi.fn(),
+}));
+
+const mockConversationRepository = vi.hoisted(() => ({
+  upsertConversation: vi.fn(),
+  saveMessage: vi.fn(),
+  updateContactIntake: vi.fn(),
 }));
 
 vi.mock('../../src/shared/redis', () => ({
@@ -115,6 +132,12 @@ vi.mock('../../src/modules/intent/classifier', () => ({
 }));
 vi.mock('../../src/modules/scheduling/state', () => mockSchedulingState);
 vi.mock('../../src/modules/conversations/contextLoader', () => mockContextLoader);
+vi.mock('../../src/modules/conversations/repository', () => ({
+  conversationRepository: mockConversationRepository,
+}));
+vi.mock('../../src/modules/webhook/worker', () => ({
+  chatwootWebhookWorker: mockWebhookWorker,
+}));
 vi.mock('../../src/modules/knowledge/adminRoutes', async () => {
   const express = await vi.importActual<typeof import('express')>('express');
   return { knowledgeAdminRouter: express.Router() };
@@ -125,6 +148,7 @@ vi.mock('../../src/modules/scheduling/adminRoutes', async () => {
 });
 
 import { app } from '../../src/app';
+import { processWebhookEvent } from '../../src/modules/runtime/agentRuntime';
 
 async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   const server = http.createServer(app);
@@ -141,8 +165,8 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   }
 }
 
-function signBody(body: string): string {
-  return `sha256=${createHmac('sha256', 'test-webhook-secret').update(Buffer.from(body)).digest('hex')}`;
+function signBody(body: string, timestamp: string): string {
+  return `sha256=${createHmac('sha256', 'test-webhook-secret').update(`${timestamp}.${body}`).digest('hex')}`;
 }
 
 function createConversationContext(): ConversationContext {
@@ -164,7 +188,7 @@ function createConversationContext(): ConversationContext {
   };
 }
 
-function createSignedPayload(content: string): { body: string; signature: string } {
+function createSignedPayload(content: string): { body: string; signature: string; timestamp: string } {
   const payload: ChatwootWebhookPayload = {
     id: 1,
     event: 'message_created',
@@ -192,7 +216,8 @@ function createSignedPayload(content: string): { body: string; signature: string
     },
   };
   const body = JSON.stringify(payload);
-  return { body, signature: signBody(body) };
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  return { body, signature: signBody(body, timestamp), timestamp };
 }
 
 describe('signed Chatwoot webhook to agent response flow', () => {
@@ -202,6 +227,12 @@ describe('signed Chatwoot webhook to agent response flow', () => {
     mockRedis.setMessageHash.mockResolvedValue(undefined);
     mockRedis.setMessageHashIfAbsent.mockResolvedValue(true);
     mockRedis.setContentHashIfAbsent.mockResolvedValue(true);
+    mockRedis.claimMessageHash.mockResolvedValue(true);
+    mockRedis.releaseMessageHash.mockResolvedValue(true);
+    mockRedis.claimContentHash.mockResolvedValue(true);
+    mockRedis.releaseContentHash.mockResolvedValue(true);
+    mockRedis.acquireLock.mockResolvedValue(true);
+    mockRedis.releaseLock.mockResolvedValue(true);
     mockRedis.markBotOutgoingContent.mockResolvedValue(undefined);
     mockRedis.markBotOutgoingMessageId.mockResolvedValue(undefined);
     mockRedis.isBotOutgoingMessageId.mockResolvedValue(false);
@@ -209,6 +240,7 @@ describe('signed Chatwoot webhook to agent response flow', () => {
     mockContextLoader.loadConversationContext.mockResolvedValue(createConversationContext());
     mockContextLoader.addMessageToContext.mockImplementation(async (context) => context);
     mockContextLoader.updateConversationState.mockResolvedValue(undefined);
+    mockContextLoader.saveConversationContext.mockResolvedValue(undefined);
     mockContextLoader.resetExpiredHandoff.mockResolvedValue(undefined);
     mockContextLoader.loadContactAndMemories.mockResolvedValue({
       contactId: 'contact-99',
@@ -240,28 +272,54 @@ describe('signed Chatwoot webhook to agent response flow', () => {
       action: { type: 'respond', content: 'ok' },
     });
     mockChatwoot.sendMessage.mockResolvedValue({ id: 999 });
+    mockConversationRepository.upsertConversation.mockResolvedValue({
+      id: 'persisted-conversation-123',
+    });
+    mockConversationRepository.saveMessage.mockResolvedValue({ id: 'persisted-message-1' });
+    mockConversationRepository.updateContactIntake.mockResolvedValue(undefined);
+    mockWebhookWorker.enqueue.mockResolvedValue({ id: 'webhook-job-1' });
   });
 
-  it('accepts a signed Chatwoot webhook, retrieves knowledge, calls AI, and sends the response back to Chatwoot', async () => {
+  it('queues a signed webhook before the worker retrieves knowledge, calls AI, and responds through Chatwoot', async () => {
+    let signedRequest: ReturnType<typeof createSignedPayload> | undefined;
     await withServer(async (baseUrl) => {
-      const { body, signature } = createSignedPayload('quero agendar consulta para o Buddy');
+      const { body, signature, timestamp } = createSignedPayload(
+        'Sou tutora e quero agendar consulta para o Buddy'
+      );
+      signedRequest = { body, signature, timestamp };
 
       const response = await fetch(`${baseUrl}/webhooks/chatwoot`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'x-chatwoot-signature': signature,
+          'x-chatwoot-timestamp': timestamp,
         },
         body,
       });
 
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ success: true });
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toEqual({ success: true, queued: true });
     });
 
-    expect(mockRedis.setMessageHashIfAbsent).toHaveBeenCalledOnce();
+    expect(mockWebhookWorker.enqueue).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(String),
+      createHash('sha256')
+        .update(signedRequest!.timestamp)
+        .update('.')
+        .update(signedRequest!.body)
+        .digest('hex')
+    );
+
+    const [queuedPayload] = mockWebhookWorker.enqueue.mock.calls[0] as [ChatwootWebhookPayload];
+    await processWebhookEvent(queuedPayload);
+
+    expect(mockRedis.claimMessageHash).toHaveBeenCalledOnce();
+    expect(mockRedis.claimContentHash).toHaveBeenCalledOnce();
+    expect(mockRedis.releaseLock).toHaveBeenCalledOnce();
     expect(mockKnowledgeRetrieval.search).toHaveBeenCalledWith({
-      query: 'quero agendar consulta para o Buddy',
+      query: 'Perfil do contato: tutor. Motivo do contato: quero agendar consulta para o Buddy.',
       limit: 3,
       minRelevance: 0.7,
     });
@@ -301,5 +359,48 @@ describe('signed Chatwoot webhook to agent response flow', () => {
         action: 'respond',
       }),
     }));
+  });
+
+  it('starts a structured intake before calling knowledge or AI on a generic greeting', async () => {
+    const { body } = createSignedPayload('Olá');
+    await processWebhookEvent(JSON.parse(body) as ChatwootWebhookPayload);
+
+    expect(mockConversationRepository.updateContactIntake).toHaveBeenCalledWith(
+      'persisted-conversation-123',
+      expect.objectContaining({
+        stage: 'identification',
+        unansweredAttempts: 1,
+      })
+    );
+    expect(mockKnowledgeRetrieval.search).not.toHaveBeenCalled();
+    expect(mockAiRouter.generate).not.toHaveBeenCalled();
+    expect(mockChatwoot.sendMessage).toHaveBeenCalledWith({
+      conversationId: 123,
+      content: expect.stringContaining('tutor/cliente, colaborador ou fornecedor'),
+    });
+  });
+
+  it('acknowledges a duplicate signed delivery without queueing it again', async () => {
+    mockWebhookWorker.enqueue.mockResolvedValueOnce(null);
+
+    await withServer(async (baseUrl) => {
+      const { body, signature, timestamp } = createSignedPayload('mensagem repetida');
+      const response = await fetch(`${baseUrl}/webhooks/chatwoot`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-chatwoot-signature': signature,
+          'x-chatwoot-timestamp': timestamp,
+        },
+        body,
+      });
+
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toEqual({
+        success: true,
+        queued: false,
+        duplicate: true,
+      });
+    });
   });
 });

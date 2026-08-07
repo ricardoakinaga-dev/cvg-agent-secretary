@@ -24,9 +24,10 @@ describe('chatwootClient', () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://app.chatwoot.com/api/v1/accounts/test-account-id/conversations/42/messages',
+      'https://app.chatwoot.com/api/v1/accounts/1/conversations/42/messages',
       {
         method: 'POST',
+        signal: expect.any(AbortSignal),
         headers: {
           'Content-Type': 'application/json',
           api_access_token: 'test-chatwoot-token',
@@ -159,7 +160,7 @@ describe('chatwootClient', () => {
     await expect(chatwootClient.healthCheck()).resolves.toBe(true);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      'https://app.chatwoot.com/api/v1/accounts/test-account-id/agents',
+      'https://app.chatwoot.com/api/v1/accounts/1/agents',
       expect.objectContaining({ method: 'GET', body: undefined })
     );
   });

@@ -1,4 +1,5 @@
 import { redisClient } from '../../shared/redis';
+import { config } from '../../config';
 import { logger } from '../logging';
 import { confirmAppointment } from './tools';
 
@@ -17,6 +18,7 @@ export interface SchedulingConversationState {
   slotId?: string;
   serviceId?: string;
   petName?: string;
+  contactId?: string;
   lastIntent?: string;
   updatedAt: string;
 }
@@ -31,7 +33,7 @@ export interface SchedulingStateMachineResult {
 const DEFAULT_TTL_SECONDS = 86400;
 
 function keyForConversation(conversationId: string): string {
-  return `conversation:${conversationId}:scheduling`;
+  return `cvg:${config.chatwoot.accountId}:conversation:${conversationId}:scheduling`;
 }
 
 export async function getSchedulingState(
@@ -86,6 +88,7 @@ export async function markSchedulingIntent(
       slotId: current?.slotId,
       serviceId: current?.serviceId,
       petName: petName || current?.petName,
+      contactId: current?.contactId,
       lastIntent: intent,
     };
     await setSchedulingState(conversationId, next);
@@ -102,6 +105,7 @@ export async function markSchedulingIntent(
     slotId: current?.slotId,
     serviceId: current?.serviceId,
     petName: petName || current?.petName,
+    contactId: current?.contactId,
     lastIntent: intent,
   };
   await setSchedulingState(conversationId, next);
@@ -127,7 +131,24 @@ export async function handleSchedulingStateMachine(
   }
 
   if (isPositiveConfirmation(message)) {
-    const result = await confirmAppointment({ appointmentId: state.appointmentId });
+    if (!state.contactId?.trim()) {
+      logger.warn('Scheduling confirmation blocked because ownership is missing', {
+        conversationId,
+        appointmentId: state.appointmentId,
+      });
+      return {
+        handled: true,
+        stage: 'waiting_slot_confirmation',
+        appointmentId: state.appointmentId,
+        message: 'Nao consegui confirmar esse horario automaticamente. Vou chamar um atendente para verificar para voce.',
+      };
+    }
+
+    const result = await confirmAppointment({
+      appointmentId: state.appointmentId,
+      conversationId,
+      contactId: state.contactId,
+    });
     if (!result.success || !result.appointment) {
       return {
         handled: true,
@@ -143,6 +164,7 @@ export async function handleSchedulingStateMachine(
       slotId: result.appointment.slotId,
       serviceId: result.appointment.serviceId || undefined,
       petName: result.appointment.petName,
+      contactId: state.contactId,
       lastIntent: 'agendamento',
     });
 
@@ -161,6 +183,7 @@ export async function handleSchedulingStateMachine(
       slotId: state.slotId,
       serviceId: state.serviceId,
       petName: state.petName,
+      contactId: state.contactId,
       lastIntent: 'agendamento',
     });
 

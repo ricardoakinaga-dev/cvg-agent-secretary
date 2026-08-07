@@ -31,8 +31,8 @@ function normalizeBaseUrl(url: string): string {
   return url.replace(/\/$/, '');
 }
 
-function signBody(body: string, secret: string): string {
-  return `sha256=${createHmac('sha256', secret).update(Buffer.from(body)).digest('hex')}`;
+function signBody(body: string, timestamp: string, secret: string): string {
+  return `sha256=${createHmac('sha256', secret).update(`${timestamp}.${body}`).digest('hex')}`;
 }
 
 async function readJson(response: Response): Promise<unknown> {
@@ -140,11 +140,13 @@ export async function runStagingSmokeTest(
 
   try {
     const body = createWebhookBody(options);
+    const timestamp = String(Math.floor(Date.now() / 1000));
     const response = await fetchWithTimeout(fetchImpl, `${baseUrl}/webhooks/chatwoot`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-chatwoot-signature': signBody(body, options.webhookSecret),
+        'x-chatwoot-signature': signBody(body, timestamp, options.webhookSecret),
+        'x-chatwoot-timestamp': timestamp,
         'x-chatwoot-account-id': String(options.accountId),
       },
       body,

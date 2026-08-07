@@ -16,6 +16,8 @@ export type Permission =
   | 'analytics:read'
   | 'analytics:export'
   | 'audit:read'
+  | 'privacy:read'
+  | 'privacy:delete'
   | 'users:read'
   | 'users:write'
   | 'settings:read'
@@ -36,6 +38,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'analytics:read',
     'analytics:export',
     'audit:read',
+    'privacy:read',
+    'privacy:delete',
     'users:read',
     'users:write',
     'settings:read',

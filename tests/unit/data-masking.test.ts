@@ -102,11 +102,45 @@ describe('Data Masking', () => {
       expect(masked.email).toBe('t***@example.com');
     });
 
-    it('should not mask non-sensitive fields', () => {
+    it('should pseudonymize names while preserving non-sensitive fields', () => {
       const obj = { name: 'João', age: 30 };
       const masked = maskObjectForLog(obj);
-      expect(masked.name).toBe('João');
+      expect(masked.name).toBe('J.');
       expect(masked.age).toBe(30);
+    });
+
+    it('should recursively redact message content and nested inputs', () => {
+      const masked = maskObjectForLog({
+        correlationId: 'correlation-1',
+        input: {
+          name: 'Maria Silva',
+          message: 'Meu cachorro Buddy esta vomitando',
+          email: 'maria@example.com',
+        },
+      });
+
+      expect(masked).toEqual({
+        correlationId: 'correlation-1',
+        input: '[REDACTED]',
+      });
+    });
+
+    it('should remove stack traces and recursively sanitize errors', () => {
+      const masked = maskObjectForLog({
+        error: {
+          name: 'Error',
+          message: 'Falha para maria@example.com',
+          stack: 'Error: Falha\n at /private/source.ts:10',
+        },
+      });
+
+      expect(masked).toEqual({
+        error: {
+          name: 'E.',
+          message: '[REDACTED]',
+          stack: '[REDACTED]',
+        },
+      });
     });
   });
 });

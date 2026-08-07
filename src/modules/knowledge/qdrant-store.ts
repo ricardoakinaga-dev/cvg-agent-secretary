@@ -6,6 +6,10 @@ import {
   KnowledgeSearchResult,
   VectorStoreInterface,
 } from './types';
+import {
+  INTERNAL_KNOWLEDGE_TAG_VALUES,
+  isPublicConversationKnowledge,
+} from './visibility';
 
 interface QdrantPoint {
   id: string | number;
@@ -103,9 +107,13 @@ function stringArray(value: unknown): string[] {
 
 function pointToChunk(point: QdrantPoint): KnowledgeChunk | null {
   const payload = point.payload || {};
+  if (String(payload.tenant_id || '') !== config.chatwoot.accountId) {
+    return null;
+  }
   const content = textPayload(payload);
+  const tags = stringArray(payload.tags);
 
-  if (!content.trim()) {
+  if (!content.trim() || !isPublicConversationKnowledge(tags)) {
     return null;
   }
 
@@ -117,7 +125,7 @@ function pointToChunk(point: QdrantPoint): KnowledgeChunk | null {
     tokenCount: undefined,
     title: String(payload.title || payload.document_title || payload.source || ''),
     category: String(payload.category || 'faq') as KnowledgeChunk['category'],
-    tags: stringArray(payload.tags),
+    tags,
     version: Number(payload.version || 1),
     source: String(payload.source || 'imported') as KnowledgeChunk['source'],
     relevance: Number(point.score || 0),
@@ -128,23 +136,45 @@ function pointToChunk(point: QdrantPoint): KnowledgeChunk | null {
 }
 
 async function qdrantRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const apiKey = config.qdrant.apiKey.trim();
   const response = await fetch(`${config.qdrant.url}${path}`, {
     ...init,
+    signal: init?.signal || AbortSignal.timeout(10_000),
     headers: {
       'Content-Type': 'application/json',
+      ...(apiKey ? { 'api-key': apiKey } : {}),
       ...(init?.headers || {}),
     },
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Qdrant request failed (${response.status}): ${detail}`);
+    throw new Error(`Qdrant request failed (${response.status})`);
   }
 
   return response.json() as Promise<T>;
 }
 
-function denseSearchBody(embedding: number[], topK: number): Record<string, unknown> {
+function categoryFilter(category?: string): Record<string, unknown> {
+  const must: Array<Record<string, unknown>> = [
+    { key: 'tenant_id', match: { value: config.chatwoot.accountId } },
+  ];
+  if (category) {
+    must.push({ key: 'category', match: { value: category } });
+  }
+  return {
+    must,
+    must_not: [{
+      key: 'tags',
+      match: { any: INTERNAL_KNOWLEDGE_TAG_VALUES },
+    }],
+  };
+}
+
+function denseSearchBody(
+  embedding: number[],
+  topK: number,
+  category?: string
+): Record<string, unknown> {
   const vectorName = resolveVectorName();
   const scoreThreshold = resolveScoreThreshold();
   const thresholdApplied = scoreThreshold > 0;
@@ -153,6 +183,7 @@ function denseSearchBody(embedding: number[], topK: number): Record<string, unkn
     limit: topK,
     with_payload: true,
     with_vector: false,
+    filter: categoryFilter(category),
   };
 
   if (thresholdApplied) {
@@ -165,7 +196,8 @@ function denseSearchBody(embedding: number[], topK: number): Record<string, unkn
 async function searchQdrant(
   embedding: number[],
   topK = 8,
-  queryText = ''
+  queryText = '',
+  category?: string
 ): Promise<QdrantPoint[]> {
   const collection = resolveCollection();
   const vectorName = resolveVectorName();
@@ -174,7 +206,7 @@ async function searchQdrant(
   const prefetchLimit = resolvePrefetchLimit(topK);
   const scoreThreshold = resolveScoreThreshold();
   const thresholdApplied = scoreThreshold > 0;
-  const denseBody = denseSearchBody(embedding, topK);
+  const denseBody = denseSearchBody(embedding, topK, category);
 
   try {
     const sparseQuery = searchMode === 'hybrid' ? createSparseVector(queryText) : null;
@@ -201,6 +233,7 @@ async function searchQdrant(
             limit: topK,
             with_payload: true,
             with_vector: false,
+            filter: categoryFilter(category),
           }),
         }
       )
@@ -304,6 +337,7 @@ export class QdrantHybridStore implements VectorStoreInterface {
           [config.qdrant.sparseVectorName]: createSparseVector(chunk.content),
         },
         payload: {
+          tenant_id: config.chatwoot.accountId,
           chunk_id: chunk.id,
           document_id: chunk.documentId,
           chunk_index: chunk.chunkIndex,
@@ -336,7 +370,7 @@ export class QdrantHybridStore implements VectorStoreInterface {
       throw new Error(`Invalid Qdrant dense vector dimension: expected 1536, got ${embedding.length}`);
     }
 
-    const points = await searchQdrant(embedding, options.limit, query);
+    const points = await searchQdrant(embedding, options.limit, query, options.category);
     const results: KnowledgeSearchResult[] = [];
     for (const point of points) {
       const chunk = pointToChunk(point);
@@ -346,7 +380,7 @@ export class QdrantHybridStore implements VectorStoreInterface {
 
       results.push({
         chunk,
-        relevance: Math.max(Number(point.score || 0), options.minRelevance),
+        relevance: Number(point.score ?? 0),
         documentTitle: chunk.title,
       });
     }
@@ -363,7 +397,10 @@ export class QdrantHybridStore implements VectorStoreInterface {
       method: 'POST',
       body: JSON.stringify({
         filter: {
-          must: [{ key: 'document_id', match: { value: documentId } }],
+          must: [
+            { key: 'tenant_id', match: { value: config.chatwoot.accountId } },
+            { key: 'document_id', match: { value: documentId } },
+          ],
         },
       }),
     });

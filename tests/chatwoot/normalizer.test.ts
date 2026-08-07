@@ -3,6 +3,7 @@ import {
   isRelevantEvent,
   extractConversationMetadata,
   normalizeChatwootMessageType,
+  validateChatwootSource,
 } from '../../src/modules/chatwoot/normalizer';
 import { ChatwootWebhookPayload } from '../../src/shared/types';
 
@@ -41,6 +42,38 @@ const createMockPayload = (overrides: Partial<ChatwootWebhookPayload> = {}): Cha
 });
 
 describe('Chatwoot Normalizer', () => {
+  describe('validateChatwootSource', () => {
+    it('accepts only the configured account and inbox', () => {
+      expect(validateChatwootSource(createMockPayload(), { accountId: '1', inboxIds: [2] })).toEqual({
+        valid: true,
+        accountId: 1,
+        inboxId: 2,
+      });
+    });
+
+    it.each([
+      { overrides: { conversation: { ...createMockPayload().conversation, account_id: 9 } }, reason: 'account' },
+      { overrides: { conversation: { ...createMockPayload().conversation, account_id: undefined } }, reason: 'account' },
+      { overrides: { conversation: { ...createMockPayload().conversation, inbox_id: 99 } }, reason: 'inbox' },
+    ] as const)('rejects a webhook from an unexpected or missing $reason', ({ overrides, reason }) => {
+      const payload = createMockPayload(overrides as Partial<ChatwootWebhookPayload>);
+
+      expect(validateChatwootSource(payload, { accountId: '1', inboxIds: [2] })).toEqual({
+        valid: false,
+        reason,
+      });
+    });
+
+    it('rejects conflicting conversation and top-level accounts', () => {
+      const payload = createMockPayload({ account: { id: 9 } });
+
+      expect(validateChatwootSource(payload, { accountId: '1', inboxIds: [2] })).toEqual({
+        valid: false,
+        reason: 'account',
+      });
+    });
+  });
+
   describe('normalizeChatwootMessageType', () => {
     it('should normalize string and numeric Chatwoot message types', () => {
       expect(normalizeChatwootMessageType('incoming')).toBe('incoming');
@@ -117,6 +150,24 @@ describe('Chatwoot Normalizer', () => {
       const result = normalizeMessage(payload);
       expect(result).not.toBeNull();
       expect(result?.content).toBe('Mensagem numérica do Chatwoot');
+    });
+
+    it('normalizes a flat incoming webhook when the sender type is omitted', () => {
+      const payload = createMockPayload({
+        message: undefined,
+        id: 1111111112,
+        content: 'Mensagem do webhook real',
+        message_type: 'incoming',
+        private: false,
+        sender: { id: 67890, name: 'Maria Santos' },
+      });
+
+      const result = normalizeMessage(payload);
+
+      expect(result).not.toBeNull();
+      expect(result?.chatwootMessageId).toBe(1111111112);
+      expect(result?.content).toBe('Mensagem do webhook real');
+      expect(result?.senderName).toBe('Maria Santos');
     });
 
     it('should return null for private messages', () => {

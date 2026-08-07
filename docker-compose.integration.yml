@@ -1,0 +1,27 @@
+services:
+  redis:
+    restart: "no"
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
+    labels:
+      com.cvg.environment: disposable-integration
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    restart: "no"
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    labels:
+      com.cvg.environment: disposable-integration
+    healthcheck:
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  qdrant:
+    restart: "no"
+    labels:
+      com.cvg.environment: disposable-integration

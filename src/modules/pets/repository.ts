@@ -1,4 +1,5 @@
 import { query } from '../../shared/db/index.js';
+import { config } from '../../config/index.js';
 import { logger } from '../logging/index.js';
 import { 
   Pet, 
@@ -19,9 +20,9 @@ export class PetRepository {
    * Find pets by various search criteria
    */
   async find(input: PetSearchInput): Promise<Pet[]> {
-    const conditions: string[] = ['deleted_at IS NULL'];
-    const params: QueryParams = [];
-    let paramIndex = 1;
+    const conditions: string[] = ['tenant_id = $1', 'deleted_at IS NULL'];
+    const params: QueryParams = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     if (input.name) {
       conditions.push(`name ILIKE $${paramIndex++}`);
@@ -66,11 +67,11 @@ export class PetRepository {
   async findById(id: string): Promise<Pet | null> {
     const sql = `
       SELECT * FROM pets 
-      WHERE id = $1 AND deleted_at IS NULL
+      WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
     `;
 
     try {
-      const result = await query<PetRow>(sql, [id]);
+      const result = await query<PetRow>(sql, [config.chatwoot.accountId, id]);
       if (result.rows.length === 0) {
         return null;
       }
@@ -92,14 +93,15 @@ export class PetRepository {
 
     const sql = `
       INSERT INTO pets (
-        chatwoot_id, contact_id, name, species, breed, birth_date, 
+        tenant_id, chatwoot_id, contact_id, name, species, breed, birth_date,
         age_years, age_months, gender, weight, color, microchip,
         vaccination_status, medical_conditions, behavior_notes, photo_url
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       RETURNING *
     `;
 
     const params = [
+      config.chatwoot.accountId,
       input.chatwootId || null,
       input.contactId,
       input.name,
@@ -160,8 +162,8 @@ export class PetRepository {
    */
   async update(id: string, input: UpdatePetInput): Promise<Pet> {
     const fields: string[] = [];
-    const params: QueryParams = [];
-    let paramIndex = 1;
+    const params: QueryParams = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     const updateField = (field: string, value: unknown) => {
       if (value !== undefined) {
@@ -199,7 +201,7 @@ export class PetRepository {
     const sql = `
       UPDATE pets 
       SET ${fields.join(', ')}
-      WHERE id = $${paramIndex++} AND deleted_at IS NULL
+      WHERE tenant_id = $1 AND id = $${paramIndex++} AND deleted_at IS NULL
       RETURNING *
     `;
     params.push(id);
@@ -224,11 +226,11 @@ export class PetRepository {
     const sql = `
       UPDATE pets 
       SET deleted_at = NOW(), is_active = false
-      WHERE id = $1 AND deleted_at IS NULL
+      WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL
     `;
 
     try {
-      const result = await query(sql, [id]);
+      const result = await query(sql, [config.chatwoot.accountId, id]);
       if (result.rowCount === 0) {
         logger.warn('Pet not found for deletion', { id });
       } else {

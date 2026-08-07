@@ -18,6 +18,7 @@ import {
   VectorStoreInterface,
   KnowledgeCategory,
 } from './types';
+import { isPublicConversationKnowledge } from './visibility';
 
 /**
  * Default retrieval configuration
@@ -199,7 +200,7 @@ class KnowledgeRetrievalService {
       minRelevance = this.config.minRelevance 
     } = options;
 
-    logger.info('Searching knowledge', { query, category, limit });
+    logger.info('Searching knowledge', { queryLength: query.length, category, limit });
 
     try {
       let results: KnowledgeSearchResult[] = [];
@@ -212,11 +213,11 @@ class KnowledgeRetrievalService {
           embedding = await redisClient.getEmbeddingCache(vectorSearchQuery);
           if (embedding && embedding.length === this.config.embeddingDimensions) {
             metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_TOTAL, { cache: 'hit' });
-            logger.debug('Embedding cache hit', { query: vectorSearchQuery.substring(0, 50) });
+            logger.debug('Embedding cache hit', { queryLength: vectorSearchQuery.length });
           } else {
             embedding = null;
             metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_TOTAL, { cache: 'miss' });
-            logger.debug('Embedding cache miss', { query: vectorSearchQuery.substring(0, 50) });
+            logger.debug('Embedding cache miss', { queryLength: vectorSearchQuery.length });
           }
         } catch (cacheError) {
           logger.warn('Embedding cache read failed', { error: (cacheError as Error).message });
@@ -253,7 +254,10 @@ class KnowledgeRetrievalService {
       }
 
       // Filter by minimum relevance
-      const filteredResults = results.filter(r => r.relevance >= minRelevance);
+      const filteredResults = results.filter(r => (
+        r.relevance >= minRelevance
+        && isPublicConversationKnowledge(r.chunk.tags)
+      ));
 
       // Map to retrieval results
       const retrievalResults: RetrievalResult[] = filteredResults.map(r => ({
@@ -267,14 +271,14 @@ class KnowledgeRetrievalService {
       }));
 
       logger.info('Knowledge search completed', {
-        query,
+        queryLength: query.length,
         resultsCount: retrievalResults.length,
         hasVectorStore: this.useVectorStore,
       });
 
       return retrievalResults;
     } catch (error) {
-      logger.error('Knowledge search failed', error as Error, { query });
+      logger.error('Knowledge search failed', error as Error, { queryLength: query.length });
       metrics.incrementCounter(METRICS.KNOWLEDGE_SEARCH_ERRORS, { error: 'search_failed' });
       
       // Try fallback to full-text search if vector store failed
@@ -289,6 +293,7 @@ class KnowledgeRetrievalService {
           });
 
           return fallbackResults
+            .filter(chunk => isPublicConversationKnowledge(chunk.tags))
             .map(chunk => ({
               id: chunk.id,
               content: chunk.content,

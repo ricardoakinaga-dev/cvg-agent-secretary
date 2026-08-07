@@ -26,7 +26,7 @@ export function maskPhone(phone: string): string {
   const cleaned = phone.replace(/\D/g, '');
   if (cleaned.length < 8) return phone;
   const lastFour = cleaned.slice(-4);
-  const countryCode = cleaned.length > 10 ? cleaned.slice(0, 2) : '';
+  const countryCode = cleaned.length > 11 ? cleaned.slice(0, 2) : '';
   return countryCode ? `+${countryCode}**${lastFour}` : `****${lastFour}`;
 }
 
@@ -57,6 +57,20 @@ export function maskName(name: string): string {
  */
 export function maskSensitiveData(text: string): string {
   let masked = text;
+
+  // Mask formatted Brazilian phone numbers with or without country code.
+  masked = masked.replace(
+    /\+55\s*\(?\d{2}\)?(?:[\s-]*\d){8,9}\b/g,
+    (match) => maskPhone(match)
+  );
+  masked = masked.replace(
+    /\(\d{2}\)\s*\d{4,5}[\s-]*\d{4}\b/g,
+    (match) => maskPhone(match)
+  );
+
+  // Mask common formatted and unformatted 16-digit payment card numbers.
+  masked = masked.replace(/\b(?:\d{4}[\s-]){3}\d{4}\b/g, '**** **** **** ****');
+  masked = masked.replace(/\b\d{16}\b/g, '**** **** **** ****');
 
   // Mask CPF (format: XXX.XXX.XXX-XX or 11 digits)
   masked = masked.replace(
@@ -91,31 +105,71 @@ export function maskSensitiveData(text: string): string {
  * Mask object fields that might contain sensitive data
  */
 export function maskObjectForLog(obj: Record<string, unknown>): Record<string, unknown> {
-  const sensitiveFields = ['cpf', 'cnpj', 'phone', 'email', 'document', 'ssn'];
-  const masked: Record<string, unknown> = {};
+  return maskLogRecord(obj, new WeakSet<object>(), 0);
+}
 
-  for (const [key, value] of Object.entries(obj)) {
-    if (typeof value === 'string') {
-      const lowerKey = key.toLowerCase();
-      if (sensitiveFields.some(field => lowerKey.includes(field))) {
-        if (lowerKey.includes('cpf')) {
-          masked[key] = maskCPF(value);
-        } else if (lowerKey.includes('cnpj')) {
-          masked[key] = maskCNPJ(value);
-        } else if (lowerKey.includes('phone')) {
-          masked[key] = maskPhone(value);
-        } else if (lowerKey.includes('email')) {
-          masked[key] = maskEmail(value);
-        } else {
-          masked[key] = maskSensitiveData(value);
-        }
-      } else {
-        masked[key] = maskSensitiveData(value);
-      }
-    } else {
-      masked[key] = value;
-    }
+const REDACTED_LOG_VALUE = '[REDACTED]';
+const MAX_LOG_DEPTH = 6;
+const MAX_LOG_ARRAY_ITEMS = 25;
+const CONTENT_FIELD_PATTERN = /(^|_)(input|output|payload|body|content|message|query|response|prompt|notes?|summary|description|address|stack|raw)(_|$)/i;
+
+function maskLogRecord(
+  obj: Record<string, unknown>,
+  seen: WeakSet<object>,
+  depth: number
+): Record<string, unknown> {
+  if (seen.has(obj)) {
+    return { circular: '[CIRCULAR]' };
+  }
+  if (depth >= MAX_LOG_DEPTH) {
+    return { truncated: '[MAX_DEPTH]' };
   }
 
+  seen.add(obj);
+  const masked: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(obj)) {
+    masked[key] = maskLogValue(key, value, seen, depth + 1);
+  }
+  seen.delete(obj);
   return masked;
+}
+
+function maskLogValue(
+  key: string,
+  value: unknown,
+  seen: WeakSet<object>,
+  depth: number
+): unknown {
+  const lowerKey = key.toLowerCase();
+  if (CONTENT_FIELD_PATTERN.test(lowerKey)) {
+    return REDACTED_LOG_VALUE;
+  }
+  if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    if (lowerKey.includes('cpf')) return maskCPF(value);
+    if (lowerKey.includes('cnpj')) return maskCNPJ(value);
+    if (lowerKey.includes('phone') || lowerKey.includes('whatsapp')) return maskPhone(value);
+    if (lowerKey.includes('email')) return maskEmail(value);
+    if (lowerKey === 'name' || lowerKey.endsWith('name')) return maskName(value);
+    if (lowerKey.includes('document') || lowerKey.includes('secret') || lowerKey.includes('token')) {
+      return REDACTED_LOG_VALUE;
+    }
+    return maskSensitiveData(value);
+  }
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_LOG_ARRAY_ITEMS).map((item) => (
+      typeof item === 'object' && item !== null
+        ? maskLogRecord(item as Record<string, unknown>, seen, depth)
+        : maskLogValue('item', item, seen, depth)
+    ));
+  }
+  if (typeof value === 'object') {
+    return maskLogRecord(value as Record<string, unknown>, seen, depth);
+  }
+  return String(value);
 }

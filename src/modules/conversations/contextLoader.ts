@@ -13,8 +13,10 @@ import { petRepository } from '../pets/repository';
 import { Pet } from '../pets/types';
 import { memoryRepository } from '../memory/repository';
 import { chatwootClient } from '../chatwoot/client';
+import { handoffRepository } from '../handoff/repository';
 
 const TEMPORARY_HANDOFF_LABELS = ['handoff', 'pending'];
+const EXPIRED_HANDOFF_RESOLUTION = 'Handoff expirado; automacao retomada';
 
 /**
  * Extended context that includes memory information (for LLM context)
@@ -184,6 +186,13 @@ export async function resetExpiredHandoff(
     return false;
   }
 
+  // Persist the final state before releasing the Redis lock. If this write
+  // fails, keeping Redis in handoff makes the next sweep retry safely.
+  await handoffRepository.cancelPendingByConversation(
+    context.conversationId,
+    EXPIRED_HANDOFF_RESOLUTION
+  );
+
   logger.info('Handoff expired, resuming automation', {
     conversationId: context.conversationId,
     handoffStartedAt: context.metadata.handoffStartedAt,
@@ -294,11 +303,6 @@ export async function loadContactAndMemories(
   try {
     // Try to find existing contact by chatwoot_id
     let contact = await contactRepository.find({ chatwootId: chatwootContactId });
-    
-    // If not found, try by name (less reliable)
-    if (!contact) {
-      contact = await contactRepository.find({ name: contactName });
-    }
     
     // If still not found, create a new contact
     if (!contact) {

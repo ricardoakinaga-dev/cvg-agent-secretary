@@ -1,10 +1,12 @@
 import {
+  buildClinicalWalkInResponse,
   buildServiceAvailabilityResponse,
   buildWalkInServiceResponse,
   containsSchedulingProposal,
   hasSchedulingPolicyEvidence,
   hasWalkInServiceEvidence,
   isServiceAvailabilityQuery,
+  shouldUseClinicalWalkInResponse,
 } from '../../src/modules/knowledge/context';
 import { KnowledgeChunk } from '../../src/shared/types';
 
@@ -40,5 +42,32 @@ describe('knowledge context operational policy', () => {
     expect(buildServiceAvailabilityResponse('Vc tem exames de sangue, RX e ultrassom?', chunks)).toBe(
       'Sim, o Centro Veterinário Guarapiranga realiza exames de sangue, raio-x e ultrassonografia. Para preparo, disponibilidade e forma de atendimento, um atendente pode confirmar os detalhes sem gerar informação incorreta sobre agenda.'
     );
+  });
+
+  it('uses walk-in clinical policy for generic clinical symptom answers that try to schedule', () => {
+    const chunks: KnowledgeChunk[] = [{
+      id: 'general-consultation',
+      content: 'Consultas e atendimento CONSULTA CLINICO GERAL SEGUNDA À SÁBADO DAS 08H AS 20H R$ 89,00',
+      source: 'qdrant',
+      relevance: 0.9,
+      title: 'Tabela de Serviços',
+    }];
+
+    expect(containsSchedulingProposal('Vou iniciar o processo de agendamento de uma consulta clínica.')).toBe(true);
+    expect(shouldUseClinicalWalkInResponse('Ele está com diarréia', chunks, 'duvida_clinica')).toBe(true);
+    expect(buildClinicalWalkInResponse('Ele está com diarréia', chunks)).toContain('ordem de chegada');
+    expect(buildClinicalWalkInResponse('Ele está com diarréia', chunks)).toContain('não precisa de agendamento');
+  });
+
+  it('does not apply generic walk-in policy to specialty/procedure queries', () => {
+    const chunks: KnowledgeChunk[] = [{
+      id: 'specialty-consultation',
+      content: 'Consultas e atendimento CONSULTA CARDIOLOGICA R$ 350,00',
+      source: 'qdrant',
+      relevance: 0.9,
+      title: 'Tabela de Serviços',
+    }];
+
+    expect(shouldUseClinicalWalkInResponse('quero consulta cardiologica', chunks, 'agendamento')).toBe(false);
   });
 });

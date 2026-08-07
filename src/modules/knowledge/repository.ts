@@ -2,19 +2,26 @@
 // Phase 3: RAG and Institutional Knowledge
 
 import { query } from '../../shared/db';
-import { auditService } from '../audit/service';
-import { logger } from '../logging';
-import { 
-  KnowledgeDocument, 
-  KnowledgeChunk, 
-  CreateKnowledgeDocumentInput, 
+import { config } from '../../config';
+import { clampInteger } from '../../shared/numbers';
+import type { AuditPrincipal } from '../audit/service';
+import {
+  KnowledgeDocument,
+  KnowledgeChunk,
+  CreateKnowledgeDocumentInput,
   UpdateKnowledgeDocumentInput,
   CreateKnowledgeChunkInput,
   KnowledgeCategory,
   KnowledgeDocumentStatus,
   KnowledgeSearchOptions,
-  KnowledgeSource,
 } from './types';
+import {
+  INSERT_KNOWLEDGE_CHUNK_SQL,
+  knowledgeChunkParams,
+  mapRowToKnowledgeChunk,
+  mapRowToKnowledgeDocument,
+} from './persistence';
+import { knowledgeReviewWorkflow } from './reviewWorkflow';
 
 /**
  * Knowledge Repository
@@ -27,13 +34,14 @@ class KnowledgeRepository {
   async createDocument(input: CreateKnowledgeDocumentInput): Promise<KnowledgeDocument> {
     const sql = `
       INSERT INTO knowledge_documents (
-        title, content, category, status, version, source, source_id,
+        tenant_id, title, content, category, status, version, source, source_id,
         tags, metadata, created_by, is_active
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
       RETURNING *
     `;
 
     const result = await query(sql, [
+      config.chatwoot.accountId,
       input.title,
       input.content,
       input.category,
@@ -47,7 +55,7 @@ class KnowledgeRepository {
       true,
     ]);
 
-    return this.mapRowToDocument(result.rows[0]);
+    return mapRowToKnowledgeDocument(result.rows[0]);
   }
 
   /**
@@ -55,8 +63,8 @@ class KnowledgeRepository {
    */
   async updateDocument(input: UpdateKnowledgeDocumentInput): Promise<KnowledgeDocument> {
     const updates: string[] = [];
-    const values: unknown[] = [];
-    let paramIndex = 1;
+    const values: unknown[] = [config.chatwoot.accountId];
+    let paramIndex = 2;
 
     if (input.title !== undefined) {
       updates.push(`title = $${paramIndex++}`);
@@ -97,7 +105,7 @@ class KnowledgeRepository {
     const sql = `
       UPDATE knowledge_documents
       SET ${updates.join(', ')}, updated_at = NOW()
-      WHERE id = $${paramIndex}
+      WHERE tenant_id = $1 AND id = $${paramIndex}
       RETURNING *
     `;
 
@@ -107,21 +115,21 @@ class KnowledgeRepository {
       throw new Error(`Document not found: ${input.id}`);
     }
 
-    return this.mapRowToDocument(result.rows[0]);
+    return mapRowToKnowledgeDocument(result.rows[0]);
   }
 
   /**
    * Get document by ID
    */
   async getDocument(id: string): Promise<KnowledgeDocument | null> {
-    const sql = 'SELECT * FROM knowledge_documents WHERE id = $1';
-    const result = await query(sql, [id]);
+    const sql = 'SELECT * FROM knowledge_documents WHERE tenant_id = $1 AND id = $2';
+    const result = await query(sql, [config.chatwoot.accountId, id]);
 
     if (result.rows.length === 0) {
       return null;
     }
 
-    return this.mapRowToDocument(result.rows[0]);
+    return mapRowToKnowledgeDocument(result.rows[0]);
   }
 
   /**
@@ -130,11 +138,11 @@ class KnowledgeRepository {
   async getDocumentsByCategory(category: KnowledgeCategory): Promise<KnowledgeDocument[]> {
     const sql = `
       SELECT * FROM knowledge_documents 
-      WHERE category = $1 AND is_active = true
+      WHERE tenant_id = $1 AND category = $2 AND is_active = true
       ORDER BY version DESC, created_at DESC
     `;
-    const result = await query(sql, [category]);
-    return result.rows.map(this.mapRowToDocument);
+    const result = await query(sql, [config.chatwoot.accountId, category]);
+    return result.rows.map(mapRowToKnowledgeDocument);
   }
 
   /**
@@ -143,11 +151,11 @@ class KnowledgeRepository {
   async getPublishedDocuments(): Promise<KnowledgeDocument[]> {
     const sql = `
       SELECT * FROM knowledge_documents 
-      WHERE status = 'published' AND is_active = true
+      WHERE tenant_id = $1 AND status = 'published' AND is_active = true
       ORDER BY category, title
     `;
-    const result = await query(sql);
-    return result.rows.map(this.mapRowToDocument);
+    const result = await query(sql, [config.chatwoot.accountId]);
+    return result.rows.map(mapRowToKnowledgeDocument);
   }
 
   /**
@@ -158,8 +166,8 @@ class KnowledgeRepository {
     category?: KnowledgeCategory;
     limit?: number;
   } = {}): Promise<KnowledgeDocument[]> {
-    const clauses = ['is_active = true'];
-    const params: unknown[] = [];
+    const clauses = ['tenant_id = $1', 'is_active = true'];
+    const params: unknown[] = [config.chatwoot.accountId];
 
     if (filters.status) {
       params.push(filters.status);
@@ -181,7 +189,7 @@ class KnowledgeRepository {
     `;
 
     const result = await query(sql, params);
-    return result.rows.map(this.mapRowToDocument);
+    return result.rows.map(mapRowToKnowledgeDocument);
   }
 
   /**
@@ -200,178 +208,33 @@ class KnowledgeRepository {
     return this.updateDocument({ id, status: 'pending_review' });
   }
 
-  /**
-   * Approve a document after review. Approval does not publish content.
-   */
-  async approveDocument(id: string, approvedBy: string): Promise<KnowledgeDocument> {
-    const doc = await this.getDocument(id);
-    if (!doc) {
-      throw new Error(`Document not found: ${id}`);
-    }
 
-    if (doc.status !== 'pending_review') {
-      throw new Error(`Document must be pending_review before approval: ${doc.status}`);
-    }
-
-    const approved = await this.updateDocument({
-      id,
-      status: 'approved',
-      approvedBy,
-    });
-
-    await auditService.recordEvent({
-      eventType: 'knowledge_updated',
-      actor: approvedBy,
-      resourceType: 'knowledge_document',
-      resourceId: id,
-      action: 'approve',
-      details: {
-        title: approved.title,
-        category: approved.category,
-      },
-    });
-
-    return approved;
+  /** Critical review transitions are isolated in a transaction-focused workflow. */
+  async approveDocument(id: string, principal: AuditPrincipal): Promise<KnowledgeDocument> {
+    return knowledgeReviewWorkflow.approveDocument(id, principal);
   }
 
-  /**
-   * Reject a document and keep it out of retrieval.
-   */
-  async rejectDocument(id: string, rejectedBy: string, reason?: string): Promise<KnowledgeDocument> {
-    const doc = await this.getDocument(id);
-    if (!doc) {
-      throw new Error(`Document not found: ${id}`);
-    }
-
-    if (!['pending_review', 'draft'].includes(doc.status)) {
-      throw new Error(`Document cannot be rejected from status: ${doc.status}`);
-    }
-
-    const metadata = {
-      ...doc.metadata,
-      rejectionReason: reason,
-      rejectedBy,
-      rejectedAt: new Date().toISOString(),
-    };
-
-    const rejected = await this.updateDocument({
-      id,
-      status: 'rejected',
-      metadata,
-    });
-
-    await auditService.recordEvent({
-      eventType: 'knowledge_rejected',
-      actor: rejectedBy,
-      resourceType: 'knowledge_document',
-      resourceId: id,
-      action: 'reject',
-      details: {
-        title: rejected.title,
-        category: rejected.category,
-        reason,
-      },
-    });
-
-    return rejected;
+  async rejectDocument(
+    id: string,
+    principal: AuditPrincipal,
+    reason?: string
+  ): Promise<KnowledgeDocument> {
+    return knowledgeReviewWorkflow.rejectDocument(id, principal, reason);
   }
 
-  /**
-   * Approve and publish a document
-   */
-  async publishDocument(id: string, approvedBy: string): Promise<KnowledgeDocument> {
-    const doc = await this.getDocument(id);
-    if (!doc) {
-      throw new Error(`Document not found: ${id}`);
-    }
-
-    if (doc.status !== 'approved') {
-      throw new Error(`Document must be approved before publication: ${doc.status}`);
-    }
-
-    await query(
-      `UPDATE knowledge_documents SET is_active = false, status = 'approved' 
-       WHERE id != $1 AND title = (SELECT title FROM knowledge_documents WHERE id = $1)`,
-      [id]
-    );
-
-    const sql = `
-      UPDATE knowledge_documents
-      SET status = 'published', approved_by = $2, approved_at = NOW(), 
-          version = version + 1, updated_at = NOW()
-      WHERE id = $1
-      RETURNING *
-    `;
-    const result = await query(sql, [id, approvedBy]);
-    
-    if (result.rows.length === 0) {
-      throw new Error(`Document not found: ${id}`);
-    }
-
-    const publishedDoc = this.mapRowToDocument(result.rows[0]);
-
-    // Create chunks for the published document
-    try {
-      const { createChunksForDocument } = await import('./pipeline');
-      await createChunksForDocument(publishedDoc);
-    } catch (error) {
-      logger.warn('Failed to create chunks for document', {
-        documentId: id,
-        error: (error as Error).message,
-      });
-    }
-
-    // Audit trail for publication
-    await auditService.recordEvent({
-      eventType: 'knowledge_published',
-      actor: approvedBy,
-      resourceType: 'knowledge_document',
-      resourceId: id,
-      action: 'publish',
-      details: {
-        title: publishedDoc.title,
-        category: publishedDoc.category,
-        version: publishedDoc.version,
-      },
-    });
-
-    return publishedDoc;
+  async publishDocument(id: string, principal: AuditPrincipal): Promise<KnowledgeDocument> {
+    return knowledgeReviewWorkflow.publishDocument(id, principal);
   }
 
   /**
    * Create a knowledge chunk
    */
   async createChunk(input: CreateKnowledgeChunkInput): Promise<KnowledgeChunk> {
-    const sql = `
-      INSERT INTO knowledge_chunks (
-        document_id, chunk_index, content, embedding, token_count,
-        title, category, tags, version, source, is_active
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-      RETURNING *
-    `;
+    const result = await query(INSERT_KNOWLEDGE_CHUNK_SQL, knowledgeChunkParams(input));
 
-    // Handle embedding array for PostgreSQL
-    let embeddingValue: unknown = null;
-    if (input.embedding && input.embedding.length > 0) {
-      embeddingValue = input.embedding;
-    }
-
-    const result = await query(sql, [
-      input.documentId,
-      input.chunkIndex,
-      input.content,
-      embeddingValue,
-      input.tokenCount || null,
-      input.title || null,
-      input.category,
-      JSON.stringify(input.tags || []),
-      input.version || 1,
-      input.source || 'manual',
-      true,
-    ]);
-
-    return this.mapRowToChunk(result.rows[0]);
+    return mapRowToKnowledgeChunk(result.rows[0]);
   }
+
 
   /**
    * Create multiple chunks in a batch
@@ -392,12 +255,17 @@ class KnowledgeRepository {
    */
   async getChunksByDocument(documentId: string): Promise<KnowledgeChunk[]> {
     const sql = `
-      SELECT * FROM knowledge_chunks 
-      WHERE document_id = $1 AND is_active = true
-      ORDER BY chunk_index
+      SELECT kc.* FROM knowledge_chunks kc
+      JOIN knowledge_documents kd ON kd.tenant_id = kc.tenant_id AND kd.id = kc.document_id
+      WHERE kc.tenant_id = $1
+        AND kc.document_id = $2
+        AND kc.is_active = true
+        AND kd.is_active = true
+        AND kd.status = 'published'
+      ORDER BY kc.chunk_index
     `;
-    const result = await query(sql, [documentId]);
-    return result.rows.map(this.mapRowToChunk);
+    const result = await query(sql, [config.chatwoot.accountId, documentId]);
+    return result.rows.map(mapRowToKnowledgeChunk);
   }
 
   /**
@@ -405,27 +273,33 @@ class KnowledgeRepository {
    * This is a fallback when vector store is not available
    */
   async searchChunksFullText(options: KnowledgeSearchOptions): Promise<KnowledgeChunk[]> {
-    const limit = options.limit || 5;
-    const categoryFilter = options.category ? `AND category = $2` : '';
-    const params: unknown[] = [options.query];
+    const limit = clampInteger(options.limit, 5, 1, 100);
+    const categoryFilter = options.category ? `AND kc.category = $3` : '';
+    const params: unknown[] = [config.chatwoot.accountId, options.query];
 
     if (options.category) {
       params.push(options.category);
     }
+    const limitParameter = `$${params.length + 1}`;
+    params.push(limit);
 
     const sql = `
-      SELECT *, 
-        ts_rank(to_tsvector('portuguese', content), plainto_tsquery('portuguese', $1)) as rank
-      FROM knowledge_chunks
-      WHERE is_active = true 
+      SELECT kc.*,
+        ts_rank(to_tsvector('portuguese', kc.content), plainto_tsquery('portuguese', $2)) as rank
+      FROM knowledge_chunks kc
+      JOIN knowledge_documents kd ON kd.tenant_id = kc.tenant_id AND kd.id = kc.document_id
+      WHERE kc.tenant_id = $1
+        AND kc.is_active = true
+        AND kd.is_active = true
+        AND kd.status = 'published'
         ${categoryFilter}
-        AND to_tsvector('portuguese', content) @@ plainto_tsquery('portuguese', $1)
+        AND to_tsvector('portuguese', kc.content) @@ plainto_tsquery('portuguese', $2)
       ORDER BY rank DESC
-      LIMIT ${limit}
+      LIMIT ${limitParameter}
     `;
 
     const result = await query(sql, params);
-    return result.rows.map(this.mapRowToChunk);
+    return result.rows.map(mapRowToKnowledgeChunk);
   }
 
   /**
@@ -433,12 +307,16 @@ class KnowledgeRepository {
    */
   async getAllActiveChunks(): Promise<KnowledgeChunk[]> {
     const sql = `
-      SELECT * FROM knowledge_chunks 
-      WHERE is_active = true
-      ORDER BY document_id, chunk_index
+      SELECT kc.* FROM knowledge_chunks kc
+      JOIN knowledge_documents kd ON kd.tenant_id = kc.tenant_id AND kd.id = kc.document_id
+      WHERE kc.tenant_id = $1
+        AND kc.is_active = true
+        AND kd.is_active = true
+        AND kd.status = 'published'
+      ORDER BY kc.document_id, kc.chunk_index
     `;
-    const result = await query(sql);
-    return result.rows.map(this.mapRowToChunk);
+    const result = await query(sql, [config.chatwoot.accountId]);
+    return result.rows.map(mapRowToKnowledgeChunk);
   }
 
   /**
@@ -448,58 +326,11 @@ class KnowledgeRepository {
     const sql = `
       UPDATE knowledge_chunks 
       SET is_active = false 
-      WHERE document_id = $1
+      WHERE tenant_id = $1 AND document_id = $2
     `;
-    await query(sql, [documentId]);
+    await query(sql, [config.chatwoot.accountId, documentId]);
   }
 
-  /**
-   * Map database row to KnowledgeDocument
-   */
-  private mapRowToDocument(row: Record<string, unknown>): KnowledgeDocument {
-    return {
-      id: row.id as string,
-      title: row.title as string,
-      content: row.content as string,
-      category: row.category as KnowledgeCategory,
-      status: row.status as KnowledgeDocumentStatus,
-      version: row.version as number,
-      source: row.source as KnowledgeSource,
-      sourceId: row.source_id as string | undefined,
-      effectiveFrom: row.effective_from as Date | undefined,
-      effectiveTo: row.effective_to as Date | undefined,
-      createdBy: row.created_by as string | undefined,
-      approvedBy: row.approved_by as string | undefined,
-      approvedAt: row.approved_at as Date | undefined,
-      tags: (row.tags as string[]) || [],
-      metadata: (row.metadata as Record<string, unknown>) || {},
-      isActive: row.is_active as boolean,
-      createdAt: row.created_at as Date,
-      updatedAt: row.updated_at as Date,
-    };
-  }
-
-  /**
-   * Map database row to KnowledgeChunk
-   */
-  private mapRowToChunk(row: Record<string, unknown>): KnowledgeChunk {
-    return {
-      id: row.id as string,
-      documentId: row.document_id as string,
-      chunkIndex: row.chunk_index as number,
-      content: row.content as string,
-      embedding: row.embedding as number[] | undefined,
-      tokenCount: row.token_count as number | undefined,
-      title: row.title as string | undefined,
-      category: row.category as KnowledgeCategory,
-      tags: (row.tags as string[]) || [],
-      version: row.version as number,
-      source: row.source as KnowledgeSource,
-      isActive: row.is_active as boolean,
-      createdAt: row.created_at as Date,
-      updatedAt: row.updated_at as Date,
-    };
-  }
 }
 
 export const knowledgeRepository = new KnowledgeRepository();

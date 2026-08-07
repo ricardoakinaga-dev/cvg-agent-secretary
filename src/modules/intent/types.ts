@@ -22,7 +22,7 @@ export type IntentType =
   | 'horarios'           // Hours of operation
   | 'servicos'           // Services inquiry
   | 'precos'             // Prices inquiry
-  | '不明'               // Unknown / unclear
+  | 'desconhecido'       // Unknown / unclear
   | 'none';              // No intent detected
 
 /**

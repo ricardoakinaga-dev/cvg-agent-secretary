@@ -8,12 +8,20 @@ const mockChatwoot = vi.hoisted(() => ({
   removeLabels: vi.fn(),
 }));
 
+const mockHandoffRepository = vi.hoisted(() => ({
+  cancelPendingByConversation: vi.fn(),
+}));
+
 vi.mock('../../src/shared/redis', () => ({
   redisClient: mockRedis,
 }));
 
 vi.mock('../../src/modules/chatwoot/client', () => ({
   chatwootClient: mockChatwoot,
+}));
+
+vi.mock('../../src/modules/handoff/repository', () => ({
+  handoffRepository: mockHandoffRepository,
 }));
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -50,6 +58,7 @@ describe('handoff timeout', () => {
     mockRedis.setConversationState.mockResolvedValue(undefined);
     mockRedis.listConversationStates.mockResolvedValue([]);
     mockChatwoot.removeLabels.mockResolvedValue(undefined);
+    mockHandoffRepository.cancelPendingByConversation.mockResolvedValue(1);
   });
 
   it('expires legacy handoff states without handoffUntil', () => {
@@ -101,6 +110,23 @@ describe('handoff timeout', () => {
       expect.objectContaining({ state: 'in_progress' })
     );
     expect(mockChatwoot.removeLabels).toHaveBeenCalledWith(1, ['handoff', 'pending']);
+    expect(mockHandoffRepository.cancelPendingByConversation).toHaveBeenCalledWith(
+      'chatwoot-1',
+      'Handoff expirado; automacao retomada'
+    );
+  });
+
+  it('keeps the Redis handoff state when persisting expiration fails', async () => {
+    const context = createContext();
+    mockHandoffRepository.cancelPendingByConversation.mockRejectedValue(
+      new Error('database unavailable')
+    );
+
+    await expect(resetExpiredHandoff(context)).rejects.toThrow('database unavailable');
+
+    expect(context.state).toBe('handoff');
+    expect(mockRedis.setConversationState).not.toHaveBeenCalled();
+    expect(mockChatwoot.removeLabels).not.toHaveBeenCalled();
   });
 
   it('sweeps expired handoff states from Redis even without a new message', async () => {

@@ -2,4 +2,9 @@ node_modules
 *.log
 .env
 .DS_Store
-coverage
+/dist/
+/coverage/
+/backup/
+/backups/
+*.bak
+*.bak-*

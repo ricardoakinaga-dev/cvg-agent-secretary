@@ -4,6 +4,34 @@
 import { chatwootClient } from './client';
 import { logger } from '../logging';
 
+const MAX_HANDOFF_NOTE_CHARS = 6000;
+const MAX_HISTORY_MESSAGES = 6;
+const MAX_LIST_ITEMS = 4;
+const OMITTED_MARKER = '… [conteudo omitido]';
+
+function truncateText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, maxChars - OMITTED_MARKER.length).trimEnd()}${OMITTED_MARKER}`;
+}
+
+function appendBoundedList(
+  lines: string[],
+  values: string[],
+  maxItems: number,
+  maxItemChars: number
+): void {
+  values.slice(0, maxItems).forEach((value) => {
+    lines.push(`- ${truncateText(value, maxItemChars)}`);
+  });
+
+  if (values.length > maxItems) {
+    lines.push(`- ${OMITTED_MARKER} (${values.length - maxItems} itens)`);
+  }
+}
+
 /**
  * Handoff-related labels for Chatwoot
  */
@@ -39,52 +67,56 @@ export function generateHandoffSummary(summary: HandoffSummary): string {
   const lines: string[] = [
     '📋 **RESUMO DA CONVERSA**',
     '',
-    `👤 **Cliente:** ${summary.contactName}`,
+    `👤 **Cliente:** ${truncateText(summary.contactName, 120)}`,
   ];
 
   if (summary.petName) {
-    lines.push(`🐾 **Pet:** ${summary.petName}`);
+    lines.push(`🐾 **Pet:** ${truncateText(summary.petName, 120)}`);
   }
 
   lines.push('');
   lines.push('📝 **O QUE O CLIENTE QUERIA:**');
-  lines.push(summary.whatClientWanted);
-  lines.push('');
-
-  lines.push('💬 **HISTÓRICO DA CONVERSA:**');
-  summary.conversationHistory.forEach((msg, i) => {
-    lines.push(`${i + 1}. ${msg}`);
-  });
+  lines.push(truncateText(summary.whatClientWanted, 400));
   lines.push('');
 
   if (Object.keys(summary.informationCollected).length > 0) {
     lines.push('🔍 **INFORMAÇÕES COLETADAS:**');
-    for (const [key, value] of Object.entries(summary.informationCollected)) {
-      lines.push(`- ${key}: ${value}`);
+    const entries = Object.entries(summary.informationCollected);
+    for (const [key, value] of entries.slice(0, MAX_LIST_ITEMS)) {
+      lines.push(`- ${truncateText(key, 60)}: ${truncateText(value, 120)}`);
+    }
+    if (entries.length > MAX_LIST_ITEMS) {
+      lines.push(`- ${OMITTED_MARKER} (${entries.length - MAX_LIST_ITEMS} itens)`);
     }
     lines.push('');
   }
 
   lines.push('⚠️ **MOTIVO DA TRANSFERÊNCIA:**');
-  lines.push(summary.handoffReason);
+  lines.push(truncateText(summary.handoffReason, 400));
   lines.push('');
 
   if (summary.pendingQuestions.length > 0) {
     lines.push('❓ **PERGUNTAS PENDENTES:**');
-    summary.pendingQuestions.forEach(q => {
-      lines.push(`- ${q}`);
-    });
+    appendBoundedList(lines, summary.pendingQuestions, MAX_LIST_ITEMS, 160);
     lines.push('');
   }
 
   if (summary.whatWasAnswered.length > 0) {
     lines.push('✅ **JÁ TENTAMOS/RESPONDEMOS:**');
-    summary.whatWasAnswered.forEach(a => {
-      lines.push(`- ${a}`);
-    });
+    appendBoundedList(lines, summary.whatWasAnswered, MAX_LIST_ITEMS, 160);
+    lines.push('');
   }
 
-  return lines.join('\n');
+  lines.push('💬 **HISTÓRICO DA CONVERSA (RECENTE):**');
+  const historyStart = Math.max(0, summary.conversationHistory.length - MAX_HISTORY_MESSAGES);
+  if (historyStart > 0) {
+    lines.push(`${OMITTED_MARKER} (${historyStart} mensagens anteriores)`);
+  }
+  summary.conversationHistory.slice(historyStart).forEach((message, index) => {
+    lines.push(`${historyStart + index + 1}. ${truncateText(message, 220)}`);
+  });
+
+  return truncateText(lines.join('\n'), MAX_HANDOFF_NOTE_CHARS);
 }
 
 /**

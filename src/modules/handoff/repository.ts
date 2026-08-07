@@ -2,6 +2,7 @@
 // Based on specs/08_HANDOFF_SYSTEM.md
 
 import { query } from '../../shared/db/index.js';
+import { config } from '../../config/index.js';
 import { logger } from '../logging/index.js';
 
 /**
@@ -177,13 +178,14 @@ export class HandoffRepository {
   async create(input: CreateHandoffInput): Promise<HandoffRecord> {
     const sql = `
       INSERT INTO handoffs (
-        conversation_id, contact_id, trigger_type, trigger_reason,
+        tenant_id, conversation_id, contact_id, trigger_type, trigger_reason,
         priority, summary, pending_questions, what_was_answered, what_is_missing, risk_level
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `;
 
     const params = [
+      config.chatwoot.accountId,
       input.conversationId,
       input.contactId || null,
       input.triggerType,
@@ -212,13 +214,13 @@ export class HandoffRepository {
   async findByConversation(conversationId: string): Promise<HandoffRecord | null> {
     const sql = `
       SELECT * FROM handoffs 
-      WHERE conversation_id = $1
+      WHERE tenant_id = $1 AND conversation_id = $2
       ORDER BY created_at DESC
       LIMIT 1
     `;
 
     try {
-      const result = await query<HandoffRow>(sql, [conversationId]);
+      const result = await query<HandoffRow>(sql, [config.chatwoot.accountId, conversationId]);
       if (result.rows.length === 0) {
         return null;
       }
@@ -240,16 +242,23 @@ export class HandoffRepository {
   ): Promise<HandoffRecord> {
     const sql = `
       UPDATE handoffs 
-      SET status = $1, 
-          completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END,
-          resolved_by = COALESCE($3, resolved_by),
-          resolution_notes = COALESCE($4, resolution_notes)
-      WHERE id = $5
+      SET status = $2,
+          completed_at = CASE WHEN $3 = 'completed' THEN NOW() ELSE completed_at END,
+          resolved_by = COALESCE($4, resolved_by),
+          resolution_notes = COALESCE($5, resolution_notes)
+      WHERE tenant_id = $1 AND id = $6
       RETURNING *
     `;
 
     try {
-      const result = await query<HandoffRow>(sql, [status, status, resolvedBy || null, resolutionNotes || null, id]);
+      const result = await query<HandoffRow>(sql, [
+        config.chatwoot.accountId,
+        status,
+        status,
+        resolvedBy || null,
+        resolutionNotes || null,
+        id,
+      ]);
       if (result.rows.length === 0) {
         throw new Error('Handoff not found');
       }
@@ -262,18 +271,48 @@ export class HandoffRepository {
   }
 
   /**
+   * Close active handoffs when their automation timeout expires.
+   * The update is idempotent so Redis sweep retries are safe.
+   */
+  async cancelPendingByConversation(
+    conversationId: string,
+    resolutionNotes: string
+  ): Promise<number> {
+    const sql = `
+      UPDATE handoffs
+      SET status = 'cancelled',
+          completed_at = NOW(),
+          resolved_by = COALESCE(resolved_by, $3),
+          resolution_notes = COALESCE(resolution_notes, $4)
+      WHERE tenant_id = $1
+        AND conversation_id = $2
+        AND status IN ('pending', 'in_progress')
+    `;
+
+    try {
+      const result = await query(sql, [config.chatwoot.accountId, conversationId, 'system', resolutionNotes]);
+      const updated = result.rowCount || 0;
+      logger.info('Expired handoffs cancelled', { conversationId, updated });
+      return updated;
+    } catch (error) {
+      logger.error('Error cancelling expired handoffs', error as Error, { conversationId });
+      throw error;
+    }
+  }
+
+  /**
    * Get operational rules by type
    */
   async getOperationalRules(ruleType?: string): Promise<OperationalRule[]> {
     let sql = `
       SELECT * FROM operational_rules 
-      WHERE is_active = true
+      WHERE tenant_id = $1 AND is_active = true
     `;
     
-    const params: unknown[] = [];
+    const params: unknown[] = [config.chatwoot.accountId];
     
     if (ruleType) {
-      sql += ` AND rule_type = $1`;
+      sql += ` AND rule_type = $2`;
       params.push(ruleType);
     }
     
@@ -294,12 +333,13 @@ export class HandoffRepository {
   async createNotification(input: CreateNotificationInput): Promise<SectorNotification> {
     const sql = `
       INSERT INTO sector_notifications (
-        sector, conversation_id, contact_id, message, priority
-      ) VALUES ($1, $2, $3, $4, $5)
+        tenant_id, sector, conversation_id, contact_id, message, priority
+      ) VALUES ($1, $2, $3, $4, $5, $6)
       RETURNING *
     `;
 
     const params = [
+      config.chatwoot.accountId,
       input.sector,
       input.conversationId || null,
       input.contactId || null,
@@ -334,14 +374,14 @@ export class HandoffRepository {
   async updateNotificationStatus(id: string, status: SectorNotification['status']): Promise<void> {
     const sql = `
       UPDATE sector_notifications 
-      SET status = $1,
-          sent_at = CASE WHEN $1 = 'sent' THEN NOW() ELSE sent_at END,
-          read_at = CASE WHEN $1 = 'read' THEN NOW() ELSE read_at END
-      WHERE id = $2
+      SET status = $2,
+          sent_at = CASE WHEN $2 = 'sent' THEN NOW() ELSE sent_at END,
+          read_at = CASE WHEN $2 = 'read' THEN NOW() ELSE read_at END
+      WHERE tenant_id = $1 AND id = $3
     `;
 
     try {
-      await query(sql, [status, id]);
+      await query(sql, [config.chatwoot.accountId, status, id]);
       logger.info('Notification status updated', { notificationId: id, status });
     } catch (error) {
       logger.error('Error updating notification status', error as Error, { id, status });

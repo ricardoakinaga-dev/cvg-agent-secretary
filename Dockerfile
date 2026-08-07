@@ -1,6 +1,6 @@
 # Multi-stage build for production
 # Stage 1: Build
-FROM node:20-alpine AS builder
+FROM node:20.19-alpine@sha256:658d0f63e501824d6c23e06d4bb95c71e7d704537c9d9272f488ac03a370d448 AS builder
 
 WORKDIR /app
 
@@ -18,15 +18,17 @@ COPY src/ ./src/
 RUN npm run build
 
 # Stage 2: Production
-FROM node:20-alpine
+FROM node:20.19-alpine@sha256:658d0f63e501824d6c23e06d4bb95c71e7d704537c9d9272f488ac03a370d448
 
 WORKDIR /app
+
+ENV NODE_ENV=production
 
 # Copy package files
 COPY package*.json ./
 
 # Install only production dependencies
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy built code from builder stage
 COPY --from=builder /app/dist ./dist

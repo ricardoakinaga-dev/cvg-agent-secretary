@@ -1,0 +1,107 @@
+{
+  "annotations": { "list": [] },
+  "editable": false,
+  "graphTooltip": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Replicas disponiveis",
+      "type": "stat",
+      "targets": [{ "expr": "sum(up{job=\"cvg-agent-secretary\"})", "refId": "A" }],
+      "gridPos": { "h": 7, "w": 6, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "Dependencias",
+      "type": "stat",
+      "targets": [{ "expr": "cvg:dependency_up:min", "legendFormat": "{{dependency}}", "refId": "A" }],
+      "gridPos": { "h": 7, "w": 6, "x": 6, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Idade do webhook mais antigo",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [{ "expr": "cvg:webhook_queue_oldest_age_seconds:max", "refId": "A" }],
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 0 }
+    },
+    {
+      "id": 4,
+      "title": "DLQ atual",
+      "type": "stat",
+      "targets": [{ "expr": "cvg:webhook_queue_depth:max{state=\"dead_letter\"}", "refId": "A" }],
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 0 }
+    },
+    {
+      "id": 5,
+      "title": "Fila por estado (Redis compartilhado)",
+      "type": "timeseries",
+      "targets": [{ "expr": "cvg:webhook_queue_depth:max", "legendFormat": "{{state}}", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 7 }
+    },
+    {
+      "id": 6,
+      "title": "Throughput por replica",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum by (pod) (rate(webhook_processing_total[5m]))", "legendFormat": "{{pod}}", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 7 }
+    },
+    {
+      "id": 7,
+      "title": "Latencias p95",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "expr": "cvg:webhook_processing_duration_seconds:p95_5m", "legendFormat": "processamento webhook", "refId": "A" },
+        { "expr": "cvg:webhook_queue_age_seconds:p95_5m", "legendFormat": "espera na fila", "refId": "B" },
+        { "expr": "cvg:response_duration_seconds:p95_5m", "legendFormat": "resposta", "refId": "C" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 }
+    },
+    {
+      "id": 8,
+      "title": "Taxas de erro",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [
+        { "expr": "cvg:webhook_processing_error_ratio:rate5m", "legendFormat": "webhook", "refId": "A" },
+        { "expr": "cvg:ai_provider_error_ratio:rate5m", "legendFormat": "provedor IA", "refId": "B" }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 }
+    },
+    {
+      "id": 9,
+      "title": "Handoff humano",
+      "type": "timeseries",
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [{ "expr": "cvg:handoff_ratio:rate15m", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 23 }
+    },
+    {
+      "id": 10,
+      "title": "SLO sucesso webhook (30d)",
+      "type": "stat",
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+      "targets": [{ "expr": "cvg:slo_webhook_success_ratio:rate30d", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 23 }
+    },
+    {
+      "id": 11,
+      "title": "Burn rate do error budget",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "cvg:slo_webhook_error_budget_burn:rate1h", "legendFormat": "1h", "refId": "A" },
+        { "expr": "cvg:slo_webhook_error_budget_burn:rate6h", "legendFormat": "6h", "refId": "B" }
+      ],
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["cvg", "agent-secretary", "hospital", "slo"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timezone": "utc",
+  "title": "CVG Agent Secretary - Operacao e SLOs",
+  "uid": "cvg-agent-secretary",
+  "version": 1
+}

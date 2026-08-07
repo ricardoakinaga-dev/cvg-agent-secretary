@@ -2,6 +2,7 @@
 // Uses existing followup_tasks table from Phase 2
 
 import { query } from '../../shared/db/index.js';
+import { config } from '../../config/index.js';
 import { logger } from '../logging/index.js';
 
 /**
@@ -78,12 +79,13 @@ export class FollowupRepository {
   async create(input: CreateFollowupInput): Promise<FollowupTask> {
     const sql = `
       INSERT INTO followup_tasks (
-        conversation_id, contact_id, task_type, title, description, due_date, priority
-      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+        tenant_id, conversation_id, contact_id, task_type, title, description, due_date, priority
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
     `;
 
     const params = [
+      config.chatwoot.accountId,
       input.conversationId || null,
       input.contactId || null,
       input.taskType,
@@ -109,12 +111,12 @@ export class FollowupRepository {
   async findByConversation(conversationId: string): Promise<FollowupTask[]> {
     const sql = `
       SELECT * FROM followup_tasks 
-      WHERE conversation_id = $1
+      WHERE tenant_id = $1 AND conversation_id = $2
       ORDER BY due_date ASC, created_at DESC
     `;
 
     try {
-      const result = await query<FollowupRow>(sql, [conversationId]);
+      const result = await query<FollowupRow>(sql, [config.chatwoot.accountId, conversationId]);
       return result.rows.map(mapRowToFollowup);
     } catch (error) {
       logger.error('Error finding followups by conversation', error as Error, { conversationId });
@@ -128,7 +130,7 @@ export class FollowupRepository {
   async findPending(limit: number = 50): Promise<FollowupTask[]> {
     const sql = `
       SELECT * FROM followup_tasks 
-      WHERE status = 'pending'
+      WHERE tenant_id = $1 AND status = 'pending'
       ORDER BY 
         CASE priority 
           WHEN 'high' THEN 1 
@@ -136,11 +138,11 @@ export class FollowupRepository {
           WHEN 'low' THEN 3 
         END,
         due_date ASC
-      LIMIT $1
+      LIMIT $2
     `;
 
     try {
-      const result = await query<FollowupRow>(sql, [limit]);
+      const result = await query<FollowupRow>(sql, [config.chatwoot.accountId, limit]);
       return result.rows.map(mapRowToFollowup);
     } catch (error) {
       logger.error('Error finding pending followups', error as Error);
@@ -158,15 +160,15 @@ export class FollowupRepository {
   ): Promise<FollowupTask> {
     const sql = `
       UPDATE followup_tasks 
-      SET status = $1,
-          completed_at = CASE WHEN $1 = 'completed' THEN NOW() ELSE completed_at END,
-          completed_by = CASE WHEN $1 = 'completed' THEN COALESCE($2, completed_by) ELSE completed_by END
-      WHERE id = $3
+      SET status = $2,
+          completed_at = CASE WHEN $2 = 'completed' THEN NOW() ELSE completed_at END,
+          completed_by = CASE WHEN $2 = 'completed' THEN COALESCE($3, completed_by) ELSE completed_by END
+      WHERE tenant_id = $1 AND id = $4
       RETURNING *
     `;
 
     try {
-      const result = await query<FollowupRow>(sql, [status, completedBy || null, id]);
+      const result = await query<FollowupRow>(sql, [config.chatwoot.accountId, status, completedBy || null, id]);
       if (result.rows.length === 0) {
         throw new Error('Followup task not found');
       }

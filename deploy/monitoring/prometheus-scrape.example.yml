@@ -1,0 +1,66 @@
+# Example for Prometheus running inside Kubernetes. The discovery contract is
+# deliberately pod-level: scraping a load-balanced Service would observe only a
+# subset of replicas and make counter aggregation/restart handling incorrect.
+scrape_configs:
+  - job_name: cvg-agent-secretary
+    scheme: https
+    metrics_path: /api/metrics
+    params:
+      format: [prometheus]
+    scrape_interval: 15s
+    scrape_timeout: 5s
+    honor_labels: false
+    sample_limit: 10000
+    label_limit: 16
+    label_name_length_limit: 64
+    label_value_length_limit: 128
+
+    # A short-lived service identity must be minted by the configured IdP. Do
+    # not put a static application JWT in a Secret: application JWTs expire.
+    oauth2:
+      client_id: cvg-prometheus
+      client_secret_file: /run/secrets/cvg_prometheus_oauth_client_secret
+      token_url: https://identity.internal.example/oauth2/token
+      scopes: [cvg.metrics.read]
+      tls_config:
+        ca_file: /run/secrets/internal_ca.pem
+
+    # mTLS protects pod-level metrics in transit. The certificate served by
+    # each pod/sidecar must contain this internal metrics DNS SAN.
+    tls_config:
+      ca_file: /run/secrets/internal_ca.pem
+      cert_file: /run/secrets/prometheus_client.pem
+      key_file: /run/secrets/prometheus_client_key.pem
+      server_name: metrics.cvg-agent-secretary.svc.cluster.local
+
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [cvg-production]
+
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_phase]
+        regex: Running
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        regex: cvg-agent-secretary
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        regex: "true"
+        action: keep
+      - source_labels: [__meta_kubernetes_pod_ip]
+        regex: (.+)
+        replacement: $1:3000
+        target_label: __address__
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - replacement: production
+        target_label: environment
+
+    # Labels capable of carrying identifiers are rejected defensively even if
+    # accidentally introduced by a future application change.
+    metric_relabel_configs:
+      - regex: tenant_id|account_id|contact_id|conversation_id|job_id|correlation_id|phone|email|name
+        action: labeldrop

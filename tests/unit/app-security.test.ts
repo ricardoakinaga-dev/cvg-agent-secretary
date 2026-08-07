@@ -7,22 +7,44 @@ const mockRuntime = vi.hoisted(() => ({
   processConversationCreated: vi.fn(),
 }));
 
+const mockWebhookWorker = vi.hoisted(() => ({
+  enqueue: vi.fn(),
+}));
+
 const mockKnowledgeRetrieval = vi.hoisted(() => ({
   healthCheck: vi.fn(async () => true),
 }));
 
+const mockRedis = vi.hoisted(() => ({
+  ping: vi.fn(async () => true),
+}));
+
+const mockDatabase = vi.hoisted(() => ({
+  checkDatabaseConnection: vi.fn(async () => true),
+}));
+
+const mockAudit = vi.hoisted(() => ({
+  getEvents: vi.fn(async () => []),
+}));
+
 vi.mock('../../src/modules/runtime/agentRuntime', () => mockRuntime);
+vi.mock('../../src/modules/webhook/worker', () => ({
+  chatwootWebhookWorker: mockWebhookWorker,
+}));
 vi.mock('../../src/modules/chatwoot/client', () => ({
   chatwootClient: { healthCheck: vi.fn(async () => true) },
 }));
 vi.mock('../../src/shared/redis', () => ({
-  redisClient: { ping: vi.fn(async () => true) },
+  redisClient: mockRedis,
 }));
 vi.mock('../../src/modules/openai/client', () => ({
   openaiClient: { healthCheck: vi.fn(async () => true) },
 }));
 vi.mock('../../src/shared/db', () => ({
-  checkDatabaseConnection: vi.fn(async () => true),
+  checkDatabaseConnection: mockDatabase.checkDatabaseConnection,
+}));
+vi.mock('../../src/modules/audit/service', () => ({
+  auditService: mockAudit,
 }));
 vi.mock('../../src/modules/analytics/index', () => ({
   analyticsService: {
@@ -61,37 +83,41 @@ async function withServer<T>(fn: (baseUrl: string) => Promise<T>): Promise<T> {
   }
 }
 
-function signBody(body: string): string {
-  return `sha256=${createHmac('sha256', 'test-webhook-secret').update(Buffer.from(body)).digest('hex')}`;
+function signBody(body: string, timestamp: string): string {
+  return `sha256=${createHmac('sha256', 'test-webhook-secret').update(`${timestamp}.${body}`).digest('hex')}`;
 }
 
 describe('app security controls', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockKnowledgeRetrieval.healthCheck.mockResolvedValue(true);
+    mockRedis.ping.mockResolvedValue(true);
+    mockDatabase.checkDatabaseConnection.mockResolvedValue(true);
+    mockAudit.getEvents.mockResolvedValue([]);
+    mockWebhookWorker.enqueue.mockResolvedValue({ id: 'webhook-job-1' });
   });
 
-  it('reports knowledge retrieval in health checks', async () => {
+  it('keeps liveness local and does not disclose dependency details', async () => {
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/health`);
-      const body = await response.json();
+      const body = await response.json() as Record<string, unknown>;
 
       expect(response.status).toBe(200);
-      expect(body.dependencies.knowledge).toBe('connected');
-      expect(mockKnowledgeRetrieval.healthCheck).toHaveBeenCalledOnce();
+      expect(body.status).toBe('healthy');
+      expect(body).not.toHaveProperty('dependencies');
+      expect(mockKnowledgeRetrieval.healthCheck).not.toHaveBeenCalled();
     });
   });
 
-  it('degrades health when knowledge retrieval is unavailable', async () => {
-    mockKnowledgeRetrieval.healthCheck.mockResolvedValue(false);
+  it('reports not ready when a required local store is unavailable', async () => {
+    mockRedis.ping.mockResolvedValue(false);
 
     await withServer(async (baseUrl) => {
-      const response = await fetch(`${baseUrl}/health`);
-      const body = await response.json();
+      const response = await fetch(`${baseUrl}/ready`);
+      const body = await response.json() as { ready: boolean };
 
       expect(response.status).toBe(503);
-      expect(body.status).toBe('degraded');
-      expect(body.dependencies.knowledge).toBe('error');
+      expect(body.ready).toBe(false);
     });
   });
 
@@ -103,7 +129,7 @@ describe('app security controls', () => {
     });
   });
 
-  it('enforces RBAC after authentication', async () => {
+  it('ignores an untrusted role header and uses the server-side principal', async () => {
     await withServer(async (baseUrl) => {
       const response = await fetch(`${baseUrl}/api/audit/events`, {
         headers: {
@@ -112,7 +138,8 @@ describe('app security controls', () => {
         },
       });
 
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(200);
+      expect(mockAudit.getEvents).toHaveBeenCalledOnce();
     });
   });
 
@@ -132,7 +159,7 @@ describe('app security controls', () => {
     });
   });
 
-  it('accepts signed chatwoot webhooks before dispatching to runtime', async () => {
+  it('queues signed chatwoot webhooks and responds before runtime processing', async () => {
     await withServer(async (baseUrl) => {
       const body = JSON.stringify({
         event: 'message_created',
@@ -140,7 +167,7 @@ describe('app security controls', () => {
           id: 1,
           content: 'oi',
           message_type: 'incoming',
-          sender: { name: 'Maria', type: 'contact' },
+          sender: { id: 1, name: 'Maria', type: 'contact' },
           private: false,
         },
         conversation: {
@@ -148,21 +175,30 @@ describe('app security controls', () => {
           uuid: 'conversation-1',
           inbox_id: 1,
           account_id: 1,
+          status: 'open',
           contact: { id: 1, name: 'Maria' },
         },
       });
+      const timestamp = Math.floor(Date.now() / 1000).toString();
 
       const response = await fetch(`${baseUrl}/webhooks/chatwoot`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-chatwoot-signature': signBody(body),
+          'x-chatwoot-signature': signBody(body, timestamp),
+          'x-chatwoot-timestamp': timestamp,
         },
         body,
       });
 
-      expect(response.status).toBe(200);
-      expect(mockRuntime.processWebhookEvent).toHaveBeenCalledOnce();
+      expect(response.status).toBe(202);
+      await expect(response.json()).resolves.toEqual({ success: true, queued: true });
+      expect(mockWebhookWorker.enqueue).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'message_created' }),
+        expect.any(String),
+        expect.stringMatching(/^[a-f\d]{64}$/)
+      );
+      expect(mockRuntime.processWebhookEvent).not.toHaveBeenCalled();
     });
   });
 });

@@ -86,11 +86,20 @@ export interface ReserveSlotInput {
   holdMinutes?: number;
 }
 
-export interface ConfirmAppointmentInput {
+export interface AppointmentOwnershipInput {
+  conversationId?: string;
+  contactId?: string;
+}
+
+export interface ConfirmAppointmentInput extends AppointmentOwnershipInput {
   appointmentId: string;
 }
 
-export interface CancelAppointmentInput {
+export interface CancelAppointmentInput extends AppointmentOwnershipInput {
   appointmentId: string;
   reason?: string;
+}
+
+export interface RescheduleAppointmentInput extends ReserveSlotInput {
+  appointmentId: string;
 }

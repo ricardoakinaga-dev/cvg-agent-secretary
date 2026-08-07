@@ -1,22 +1,36 @@
 import express, { Request, Response, NextFunction } from 'express';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { logger } from './modules/logging';
-import { processWebhookEvent, processConversationCreated } from './modules/runtime/agentRuntime';
-import { chatwootClient } from './modules/chatwoot/client';
-import { HealthStatus, DependencyStatus, ChatwootWebhookPayload } from './shared/types';
+import { HealthStatus, ChatwootWebhookPayload } from './shared/types';
 import { redisClient } from './shared/redis';
-import { openaiClient } from './modules/openai/client';
 import { apiLimiter, webhookLimiter } from './middleware/rate-limit';
 import { authenticateApi, requirePermission } from './middleware/auth';
 import { verifyChatwootSignature } from './middleware/chatwoot-signature';
 import { analyticsService } from './modules/analytics/index';
 import { knowledgeAdminRouter } from './modules/knowledge/adminRoutes';
-import { knowledgeRetrievalService } from './modules/knowledge/retrieval';
 import { schedulingAdminRouter } from './modules/scheduling/adminRoutes';
 import { metrics } from './shared/metrics';
 import { checkDatabaseConnection } from './shared/db';
+import { validateBody } from './modules/validation/middleware';
+import { ChatwootWebhookSchema } from './modules/validation/schemas';
+import { chatwootWebhookWorker } from './modules/webhook/worker';
+import { config } from './config';
+import { createPrivacyRuntime } from './modules/privacy/runtime';
+import { observabilityRouter } from './modules/observability';
 
 const app = express();
+app.set('trust proxy', config.trustProxyHops);
+const READINESS_CACHE_TTL_MS = 5_000;
+const READINESS_TIMEOUT_MS = 1_000;
+
+let readinessCache: { ready: boolean; expiresAt: number } | null = null;
+let readinessCheckInFlight: Promise<boolean> | null = null;
+
+// Reject abusive webhook traffic before allocating memory for JSON parsing.
+app.use('/webhooks', webhookLimiter);
+// Metrics are GET-only and protected before the global JSON parser so an
+// unauthenticated oversized body cannot consume parsing memory.
+app.use('/api/metrics', observabilityRouter);
 
 // Middleware
 app.use(express.json({
@@ -44,7 +58,6 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
 // Rate limiting
 app.use('/api', apiLimiter);
-app.use('/webhooks', webhookLimiter);
 
 // Health check endpoint
 app.get('/health', async (req: Request, res: Response) => {
@@ -61,6 +74,21 @@ app.get('/ready', async (req: Request, res: Response) => {
 
 app.use('/api/knowledge', authenticateApi, knowledgeAdminRouter);
 app.use('/api/scheduling', authenticateApi, schedulingAdminRouter);
+if (config.privacy.enabled) {
+  let privacyRuntime: ReturnType<typeof createPrivacyRuntime> | undefined;
+  app.use('/api/privacy', authenticateApi, (req, res, next) => {
+    try {
+      privacyRuntime ??= createPrivacyRuntime();
+      privacyRuntime(req, res, next);
+    } catch (error) {
+      logger.error('Privacy runtime initialization failed', error);
+      res.status(503).json({
+        success: false,
+        error: 'Privacy operations are not configured',
+      });
+    }
+  });
+}
 
 // Analytics dashboard endpoint
 app.get('/api/analytics/dashboard', authenticateApi, requirePermission('analytics:read'), async (req: Request, res: Response) => {
@@ -140,17 +168,6 @@ app.get('/api/analytics/dashboard', authenticateApi, requirePermission('analytic
   } catch (error) {
     logger.error('Dashboard error', error as Error);
     res.status(500).json({ error: 'Failed to generate dashboard' });
-  }
-});
-
-// Metrics endpoint
-app.get('/api/metrics', authenticateApi, requirePermission('analytics:read'), async (req: Request, res: Response) => {
-  try {
-    const allMetrics = metrics.getAllMetrics();
-    res.json(allMetrics);
-  } catch (error) {
-    logger.error('Metrics error', error as Error);
-    res.status(500).json({ error: 'Failed to get metrics' });
   }
 });
 
@@ -244,7 +261,11 @@ app.get('/api/operational-report', authenticateApi, requirePermission('analytics
 });
 
 // Chatwoot webhook endpoint
-app.post('/webhooks/chatwoot', verifyChatwootSignature, async (req: Request, res: Response) => {
+app.post(
+  '/webhooks/chatwoot',
+  verifyChatwootSignature,
+  validateBody(ChatwootWebhookSchema),
+  async (req: Request, res: Response) => {
   const correlationId = req.headers['x-correlation-id'] as string;
   const log = logger.child({ correlationId });
 
@@ -253,37 +274,26 @@ app.post('/webhooks/chatwoot', verifyChatwootSignature, async (req: Request, res
   });
 
   try {
-    const { event } = req.body;
-
-    switch (event) {
-      case 'message_created':
-        await processWebhookEvent(req.body);
-        break;
-
-      case 'conversation_created':
-        await processConversationCreated(req.body);
-        break;
-
-      case 'conversation_status_changed':
-        await processConversationStatusChanged(req.body);
-        break;
-
-      case 'conversation_updated':
-      case 'message_updated':
-        // These events are logged but not processed
-        log.info(`Event ${event} received but not processed`);
-        break;
-
-      default:
-        log.warn(`Unknown event type: ${event}`);
-    }
-
-    res.status(200).json({ success: true });
+    const timestamp = req.header('x-chatwoot-timestamp') as string;
+    const deliveryId = createHash('sha256')
+      .update(timestamp)
+      .update('.')
+      .update(req.rawBody as Buffer)
+      .digest('hex');
+    const job = await chatwootWebhookWorker.enqueue(
+      req.body as ChatwootWebhookPayload,
+      correlationId,
+      deliveryId
+    );
+    res.status(202).json(job
+      ? { success: true, queued: true }
+      : { success: true, queued: false, duplicate: true });
   } catch (error) {
-    log.error('Error processing webhook', error as Error);
-    res.status(500).json({ success: false, error: 'Internal server error' });
+    log.error('Error queueing webhook', error as Error);
+    res.status(503).json({ success: false, error: 'Webhook queue unavailable' });
   }
-});
+  }
+);
 
 // Error handling middleware
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -299,133 +309,53 @@ app.use((req: Request, res: Response) => {
 });
 
 /**
- * Get health status of all dependencies
+ * Report process liveness without invoking external dependencies.
  */
-async function getHealthStatus(): Promise<HealthStatus> {
-  const dependencies: DependencyStatus = {
-    redis: 'disconnected',
-    postgres: 'disconnected',
-    chatwoot: 'disconnected',
-    openai: 'disconnected',
-    knowledge: 'disconnected',
-  };
-
-  let allHealthy = true;
-
-  // Check Redis
-  try {
-    const redisHealthy = await redisClient.ping();
-    dependencies.redis = redisHealthy ? 'connected' : 'error';
-    allHealthy = allHealthy && redisHealthy;
-  } catch {
-    dependencies.redis = 'error';
-    allHealthy = false;
-  }
-
-  // Check Postgres
-  try {
-    const postgresHealthy = await checkDatabaseConnection();
-    dependencies.postgres = postgresHealthy ? 'connected' : 'error';
-    allHealthy = allHealthy && postgresHealthy;
-  } catch {
-    dependencies.postgres = 'error';
-    allHealthy = false;
-  }
-
-  // Check Chatwoot
-  try {
-    const chatwootHealthy = await chatwootClient.healthCheck();
-    dependencies.chatwoot = chatwootHealthy ? 'connected' : 'error';
-    allHealthy = allHealthy && chatwootHealthy;
-  } catch {
-    dependencies.chatwoot = 'error';
-    allHealthy = false;
-  }
-
-  // Check OpenAI
-  try {
-    const openaiHealthy = await openaiClient.healthCheck();
-    dependencies.openai = openaiHealthy ? 'connected' : 'error';
-    allHealthy = allHealthy && openaiHealthy;
-  } catch {
-    dependencies.openai = 'error';
-    allHealthy = false;
-  }
-
-  // Check knowledge retrieval. Qdrant is optional; the service reports healthy
-  // when its active retrieval backend, including PostgreSQL fallback, is usable.
-  try {
-    const knowledgeHealthy = await knowledgeRetrievalService.healthCheck();
-    dependencies.knowledge = knowledgeHealthy ? 'connected' : 'error';
-    allHealthy = allHealthy && knowledgeHealthy;
-  } catch {
-    dependencies.knowledge = 'error';
-    allHealthy = false;
-  }
-
+async function getHealthStatus(): Promise<Pick<HealthStatus, 'status' | 'timestamp' | 'version'>> {
   return {
-    status: allHealthy ? 'healthy' : 'degraded',
+    status: 'healthy',
     timestamp: new Date().toISOString(),
     version: '1.0.0',
-    dependencies,
   };
+}
+
+async function runReadinessChecks(): Promise<boolean> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutResult = new Promise<boolean>((resolve) => {
+    timeout = setTimeout(() => resolve(false), READINESS_TIMEOUT_MS);
+    timeout.unref();
+  });
+
+  try {
+    const dependencyResult = Promise.all([
+      redisClient.ping(),
+      checkDatabaseConnection(),
+    ]).then((results) => results.every(Boolean));
+
+    return await Promise.race([dependencyResult, timeoutResult]);
+  } catch {
+    return false;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 /**
  * Check if service is ready to accept traffic
  */
 async function checkReadiness(): Promise<boolean> {
-  try {
-    // Check Redis connection
-    const redisReady = await redisClient.ping();
-    if (!redisReady) return false;
+  const now = Date.now();
+  if (readinessCache && readinessCache.expiresAt > now) return readinessCache.ready;
+  if (readinessCheckInFlight) return readinessCheckInFlight;
 
-    // Check Postgres connection
-    const postgresReady = await checkDatabaseConnection();
-    if (!postgresReady) return false;
+  readinessCheckInFlight = runReadinessChecks().then((ready) => {
+    readinessCache = { ready, expiresAt: Date.now() + READINESS_CACHE_TTL_MS };
+    return ready;
+  }).finally(() => {
+    readinessCheckInFlight = null;
+  });
 
-    // Check Chatwoot
-    const chatwootReady = await chatwootClient.healthCheck();
-    if (!chatwootReady) return false;
-
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Process conversation status changed event
- */
-async function processConversationStatusChanged(payload: ChatwootWebhookPayload): Promise<void> {
-  const log = logger.child({ event: 'conversation_status_changed' });
-  
-  try {
-    const conversationId = String(payload.conversation?.id);
-    const newStatus = payload.conversation?.status;
-    
-    log.info('Conversation status changed', {
-      conversationId,
-      newStatus,
-    });
-
-    // Track analytics when conversation is resolved or closed
-    if (newStatus === 'resolved' || newStatus === 'closed') {
-      await analyticsService.trackEvent({
-        eventType: 'conversation_ended',
-        conversationId: `conversation-${conversationId}`,
-        outcome: 'auto_resolved',
-        metadata: {
-          chatwootConversationId: conversationId,
-          status: newStatus,
-        },
-      });
-      
-      log.info('Conversation ended event tracked', { conversationId, status: newStatus });
-    }
-  } catch (error) {
-    log.error('Error processing conversation status change', error as Error);
-  }
+  return readinessCheckInFlight;
 }
 
 export { app };
