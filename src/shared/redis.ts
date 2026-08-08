@@ -13,6 +13,21 @@ const CHATWOOT_WEBHOOK_DELIVERY_PREFIX = `${REDIS_NAMESPACE}:webhook:delivery`;
 const CHATWOOT_WEBHOOK_RECOVERY_BATCH_SIZE = 100;
 const CHATWOOT_WEBHOOK_DLQ_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CHATWOOT_WEBHOOK_DLQ_MAX_ENTRIES = 1_000;
+const CHATWOOT_DELIVERY_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+const SHA256_DIGEST_PATTERN = /^[a-f\d]{64}$/i;
+
+function getRedisDeliveryKey(deliveryId: string): string {
+  if (typeof deliveryId !== 'string' || !CHATWOOT_DELIVERY_ID_PATTERN.test(deliveryId)) {
+    throw new Error('Webhook delivery id must contain 1-64 safe characters');
+  }
+
+  // Chatwoot and test adapters may provide a short opaque identifier. Keep
+  // existing digests stable, while hashing other bounded IDs before using
+  // them as Redis keys.
+  return SHA256_DIGEST_PATTERN.test(deliveryId)
+    ? deliveryId
+    : createHash('sha256').update(deliveryId, 'utf8').digest('hex');
+}
 
 class RedisClient {
   private client: Redis | null = null;
@@ -96,9 +111,7 @@ class RedisClient {
     deliveryId: string,
     ttlSeconds = 24 * 60 * 60
   ): Promise<boolean> {
-    if (!/^[a-f\d]{64}$/i.test(deliveryId)) {
-      throw new Error('Webhook delivery id must be a SHA-256 digest');
-    }
+    const redisDeliveryKey = getRedisDeliveryKey(deliveryId);
     this.assertPositiveInteger(ttlSeconds, 'ttlSeconds');
 
     const script = `
@@ -112,7 +125,7 @@ class RedisClient {
     const enqueued = await this.getClient().eval(
       script,
       2,
-      `${CHATWOOT_WEBHOOK_DELIVERY_PREFIX}:${deliveryId}`,
+      `${CHATWOOT_WEBHOOK_DELIVERY_PREFIX}:${redisDeliveryKey}`,
       CHATWOOT_WEBHOOK_PENDING_KEY,
       String(ttlSeconds),
       serializedJob

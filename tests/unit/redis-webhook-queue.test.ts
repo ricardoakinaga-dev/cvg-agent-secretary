@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import { redisClient } from '../../src/shared/redis';
 
 describe('Redis durable webhook queue', () => {
@@ -50,6 +51,28 @@ describe('Redis durable webhook queue', () => {
       expect.stringMatching(/SET.*NX.*RPUSH/s),
       2,
       `cvg:1:webhook:delivery:${deliveryId}`,
+      'cvg:1:queue:chatwoot:webhooks:pending',
+      '600',
+      'serialized-job'
+    );
+  });
+
+  it('accepts a bounded short delivery id and hashes only the Redis deduplication key', async () => {
+    const client = { eval: vi.fn().mockResolvedValue(1) };
+    vi.spyOn(redisClient, 'getClient').mockReturnValue(client as never);
+    const deliveryId = 'chatwoot-delivery-123';
+    const redisDeliveryKey = createHash('sha256').update(deliveryId).digest('hex');
+
+    await expect(redisClient.enqueueChatwootWebhookOnce(
+      'serialized-job',
+      deliveryId,
+      600
+    )).resolves.toBe(true);
+
+    expect(client.eval).toHaveBeenCalledWith(
+      expect.stringMatching(/SET.*NX.*RPUSH/s),
+      2,
+      `cvg:1:webhook:delivery:${redisDeliveryKey}`,
       'cvg:1:queue:chatwoot:webhooks:pending',
       '600',
       'serialized-job'

@@ -202,7 +202,7 @@ describe('infrastructure coverage: Redis data operations', () => {
   });
 
   it('rejects invalid queue identifiers, ownership, durations, and limits before Redis', async () => {
-    await expect(redisClient.enqueueChatwootWebhookOnce('job', 'not-a-digest')).rejects.toThrow(/SHA-256/);
+    await expect(redisClient.enqueueChatwootWebhookOnce('job', 'not a valid delivery id')).rejects.toThrow(/delivery id/i);
     await expect(redisClient.enqueueChatwootWebhookOnce('job', 'a'.repeat(64), 0)).rejects.toThrow(/ttlSeconds/);
     await expect(redisClient.claimChatwootWebhook('', 100)).rejects.toThrow(/owner token/);
     await expect(redisClient.claimChatwootWebhook('worker', 0)).rejects.toThrow(/leaseDurationMs/);
