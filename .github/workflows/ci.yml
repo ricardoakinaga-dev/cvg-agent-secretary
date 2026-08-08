@@ -121,7 +121,7 @@ jobs:
           tags: cvg-secretary-agent:test
 
       - name: Generate container image SBOM
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: cvg-secretary-agent:test
           format: cyclonedx
@@ -131,7 +131,7 @@ jobs:
         run: npm run security:scan-artifacts -- image-sbom.cdx.json
 
       - name: Scan image for high and critical vulnerabilities
-        uses: aquasecurity/trivy-action@0.33.1
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: cvg-secretary-agent:test
           format: table
