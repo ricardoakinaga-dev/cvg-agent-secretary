@@ -269,7 +269,6 @@ async function searchQdrant(
       vectorName,
       sparseVectorName,
       searchMode,
-      url: config.qdrant.url,
     });
 
     if (searchMode === 'hybrid') {

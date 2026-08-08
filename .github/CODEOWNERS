@@ -1,0 +1,15 @@
+# The repository owner must review every change. Independent security,
+# privacy, SRE and QA approvers are assigned by the release owner before G0;
+# do not replace this with guessed team names.
+* @ricardoakinaga-dev
+
+# Keep the safety-sensitive paths visible in review even when ownership is
+# expanded later through GitHub teams.
+/src/middleware/ @ricardoakinaga-dev
+/src/modules/chatwoot/ @ricardoakinaga-dev
+/src/modules/privacy/ @ricardoakinaga-dev
+/src/modules/runtime/ @ricardoakinaga-dev
+/src/modules/webhook/ @ricardoakinaga-dev
+/database/ @ricardoakinaga-dev
+/deploy/monitoring/ @ricardoakinaga-dev
+/.github/ @ricardoakinaga-dev

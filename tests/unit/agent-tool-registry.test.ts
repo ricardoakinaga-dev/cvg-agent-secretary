@@ -249,7 +249,15 @@ describe('agent tool registry', () => {
   });
 
   it('executes reschedule_appointment with runtime context', async () => {
-    mockScheduling.rescheduleAppointment.mockResolvedValue({ success: true });
+    mockScheduling.rescheduleAppointment.mockResolvedValue({
+      success: true,
+      appointment: {
+        id: APPOINTMENT_ID,
+        slotId: NEW_SLOT_ID,
+        serviceId: SERVICE_ID,
+        petName: 'Buddy',
+      },
+    });
 
     await executeAgentTool(
       'reschedule_appointment',
@@ -267,6 +275,15 @@ describe('agent tool registry', () => {
       conversationId: 'conversation-1',
       contactId: 'contact-1',
       reason: 'Novo horario',
+    });
+    expect(mockSchedulingState.setSchedulingState).toHaveBeenCalledWith('conversation-1', {
+      stage: 'waiting_slot_confirmation',
+      appointmentId: APPOINTMENT_ID,
+      slotId: NEW_SLOT_ID,
+      serviceId: SERVICE_ID,
+      petName: 'Buddy',
+      contactId: 'contact-1',
+      lastIntent: 'reagendamento',
     });
   });
 

@@ -66,6 +66,7 @@ describe('staging smoke test', () => {
       'x-chatwoot-account-id': '1',
       'x-chatwoot-signature': expectedSignature,
       'x-chatwoot-timestamp': timestamp,
+      'x-chatwoot-delivery': expect.stringMatching(/^cvg-smoke-1-123-\d+-\d+$/),
     });
     expect(JSON.parse(body)).toMatchObject({
       event: 'message_created',
@@ -98,6 +99,80 @@ describe('staging smoke test', () => {
       status: 503,
     });
     expect(result.passed).toBe(true);
+  });
+
+  it('verifies a real Chatwoot inbound message and waits for the marked response when configured', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ payload: [
+        {
+          id: 200,
+          content: 'Mensagem persistida no Chatwoot',
+          message_type: 'incoming',
+          private: false,
+        },
+      ] }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'healthy' }))
+      .mockResolvedValueOnce(jsonResponse({ ready: true }))
+      .mockResolvedValueOnce(jsonResponse({ success: true, queued: true }))
+      .mockResolvedValueOnce(jsonResponse({ payload: [
+        {
+          id: 200,
+          content: 'Mensagem persistida no Chatwoot',
+          message_type: 'incoming',
+          private: false,
+        },
+        {
+          id: 201,
+          content: 'Resposta do agente',
+          message_type: 'outgoing',
+          content_attributes: { cvg_idempotency_key: 'cvg:1:123:200' },
+        },
+      ] }));
+
+    const result = await runStagingSmokeTest(createOptions({
+      chatwootApiUrl: 'https://chatwoot.example.com/',
+      chatwootApiToken: 'staging-token',
+      messageId: 200,
+      responseTimeoutMs: 10,
+      responsePollMs: 1,
+    }), fetchMock as typeof fetch);
+
+    expect(result.passed, JSON.stringify(result)).toBe(true);
+    expect(result.checks.map((check) => check.name)).toEqual([
+      'chatwoot_inbound_message',
+      'health',
+      'readiness',
+      'signed_chatwoot_webhook',
+      'chatwoot_response_reconciled',
+    ]);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'https://chatwoot.example.com/api/v1/accounts/1/conversations/123/messages',
+      expect.objectContaining({
+        method: 'GET',
+        headers: { api_access_token: 'staging-token' },
+      })
+    );
+  });
+
+  it('does not submit a synthetic webhook when the configured message is absent', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(jsonResponse({ payload: [] }))
+      .mockResolvedValueOnce(jsonResponse({ status: 'healthy' }))
+      .mockResolvedValueOnce(jsonResponse({ ready: true }));
+
+    const result = await runStagingSmokeTest(createOptions({
+      chatwootApiUrl: 'https://chatwoot.example.com',
+      chatwootApiToken: 'staging-token',
+      messageId: 200,
+    }), fetchMock as typeof fetch);
+
+    expect(result.passed).toBe(false);
+    expect(fetchMock, JSON.stringify(result)).toHaveBeenCalledTimes(3);
+    expect(result.checks).toContainEqual(expect.objectContaining({
+      name: 'signed_chatwoot_webhook',
+      passed: false,
+    }));
   });
 
   it('fails when readiness is false or webhook is rejected', async () => {
@@ -142,6 +217,29 @@ describe('staging smoke test', () => {
       strictHealth: false,
       timeoutMs: 5000,
     });
+  });
+
+  it('requires all real Chatwoot verification variables together', () => {
+    expect(() => createSmokeOptionsFromEnv({
+      AGENT_BASE_URL: 'https://agent.example.com',
+      CHATWOOT_WEBHOOK_SECRET: 'secret',
+      SMOKE_CHATWOOT_CONVERSATION_ID: '123',
+      SMOKE_CHATWOOT_ACCOUNT_ID: '1',
+      SMOKE_CHATWOOT_INBOX_ID: '2',
+      SMOKE_CHATWOOT_CONTACT_ID: '99',
+      CHATWOOT_API_URL: 'https://chatwoot.example.com',
+    })).toThrow(/required together/);
+  });
+
+  it('rejects invalid staging identifiers instead of sending a malformed webhook', () => {
+    expect(() => createSmokeOptionsFromEnv({
+      AGENT_BASE_URL: 'https://agent.example.com',
+      CHATWOOT_WEBHOOK_SECRET: 'secret',
+      SMOKE_CHATWOOT_CONVERSATION_ID: 'not-a-number',
+      SMOKE_CHATWOOT_ACCOUNT_ID: '1',
+      SMOKE_CHATWOOT_INBOX_ID: '2',
+      SMOKE_CHATWOOT_CONTACT_ID: '99',
+    })).toThrow('SMOKE_CHATWOOT_CONVERSATION_ID must be a positive integer');
   });
 
   it('reports missing required environment variables', () => {

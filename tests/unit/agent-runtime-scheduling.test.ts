@@ -50,6 +50,8 @@ const mockSchedulingState = vi.hoisted(() => ({
 
 const mockHandoffRepository = vi.hoisted(() => ({
   create: vi.fn(),
+  findByConversation: vi.fn(),
+  updateStatus: vi.fn(),
 }));
 
 const mockAudit = vi.hoisted(() => ({
@@ -233,6 +235,8 @@ describe('agent runtime scheduling state machine', () => {
     });
     mockConversationRepository.saveMessage.mockResolvedValue({ id: 'persisted-message-1' });
     mockConversationRepository.updateContactIntake.mockResolvedValue(undefined);
+    mockHandoffRepository.findByConversation.mockResolvedValue(null);
+    mockHandoffRepository.updateStatus.mockResolvedValue(undefined);
     mockContextLoader.saveConversationContext.mockResolvedValue(undefined);
     mockHandoffRepository.create.mockResolvedValue({ id: 'handoff-1' });
     mockChatwootIntegration.executeHandoff.mockResolvedValue(undefined);
@@ -252,7 +256,8 @@ describe('agent runtime scheduling state machine', () => {
 
     expect(mockSchedulingState.handleSchedulingStateMachine).toHaveBeenCalledWith(
       'conversation-1',
-      'sim, pode confirmar'
+      'sim, pode confirmar',
+      '10'
     );
     expect(mockChatwoot.sendMessage).toHaveBeenCalledWith({
       conversationId: 123,
@@ -463,7 +468,7 @@ describe('agent runtime scheduling state machine', () => {
     expect(mockAnalytics.trackEvent).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'handoff_triggered',
       metadata: expect.objectContaining({
-        reason: 'Resposta com baixa confiança',
+        reasonHash: expect.stringMatching(/^[0-9a-f]{64}$/),
       }),
     }));
   });
@@ -708,7 +713,7 @@ describe('agent runtime scheduling state machine', () => {
     childSpy.mockRestore();
   });
 
-  it('releases owned dedup claims, propagates send failures and allows a retry', async () => {
+  it('propagates send failures, releases the conversation lock and allows a retry', async () => {
     mockChatwoot.sendMessage.mockRejectedValueOnce(new Error('Chatwoot unavailable'));
 
     await expect(processWebhookEvent(createPayload('qual o horario de atendimento?')))
@@ -719,14 +724,6 @@ describe('agent runtime scheduling state machine', () => {
       eventType: 'error_occurred',
       metadata: expect.objectContaining({ errorType: 'chatwoot_send_failed' }),
     }));
-    expect(mockRedis.releaseMessageHash).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.any(String)
-    );
-    expect(mockRedis.releaseContentHash).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.any(String)
-    );
     expect(mockRedis.releaseLock).toHaveBeenCalledWith(
       'runtime:conversation-1',
       expect.any(String)
@@ -738,11 +735,11 @@ describe('agent runtime scheduling state machine', () => {
     expect(mockChatwoot.sendMessage).toHaveBeenCalledTimes(2);
   });
 
-  it('keeps dedup claims after successful processing and releases only the lock', async () => {
+  it('does not use content-based Redis deduplication and releases only the lock', async () => {
     await processWebhookEvent(createPayload('qual o horario de atendimento?'));
 
-    expect(mockRedis.claimMessageHash).toHaveBeenCalledOnce();
-    expect(mockRedis.claimContentHash).toHaveBeenCalledOnce();
+    expect(mockRedis.claimMessageHash).not.toHaveBeenCalled();
+    expect(mockRedis.claimContentHash).not.toHaveBeenCalled();
     expect(mockRedis.releaseMessageHash).not.toHaveBeenCalled();
     expect(mockRedis.releaseContentHash).not.toHaveBeenCalled();
     expect(mockRedis.releaseLock).toHaveBeenCalledWith(

@@ -4,6 +4,10 @@ import {
   evaluateClinicalDataset,
   type ClinicalEvalDataset,
 } from '../../src/modules/security/clinical-eval';
+import {
+  determineFallbackType,
+  generateFallbackResponse,
+} from '../../src/modules/security/guardrails';
 
 describe('avaliação clínica e adversarial versionada', () => {
   it('atinge todos os thresholds de segurança do dataset', () => {
@@ -20,5 +24,11 @@ describe('avaliação clínica e adversarial versionada', () => {
       expect(result.byCategory[category as keyof typeof result.byCategory].accuracy)
         .toBeGreaterThanOrEqual(threshold);
     }
+  });
+
+  it('mantém o fallback de baixa confiança explícito e seguro', () => {
+    expect(determineFallbackType(true, 0.49, 0.95)).toBe('low_confidence');
+    expect(determineFallbackType(true, 0.90, 0.59)).toBe('low_confidence');
+    expect(generateFallbackResponse('low_confidence')).toMatch(/certeza|atendente/i);
   });
 });

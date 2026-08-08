@@ -1,4 +1,5 @@
 import { chatwootClient } from '../../src/modules/chatwoot/client';
+import { config } from '../../src/config';
 
 describe('chatwootClient', () => {
   const fetchMock = vi.fn();
@@ -62,6 +63,120 @@ describe('chatwootClient', () => {
         }),
       })
     );
+  });
+
+  it('sends a stable response idempotency marker to Chatwoot', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ id: 789 }),
+    });
+
+    await expect(chatwootClient.sendMessageWithIdempotency({
+      conversationId: 42,
+      content: 'Resposta',
+      idempotencyKey: 'cvg:1:42:100',
+    })).resolves.toEqual({ id: 789 });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/conversations/42/messages'),
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          content: 'Resposta',
+          private: false,
+          content_attributes: { cvg_idempotency_key: 'cvg:1:42:100' },
+        }),
+      })
+    );
+  });
+
+  it('finds an external response by marker before falling back to content', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ payload: [
+        {
+          id: 801,
+          content: 'Resposta',
+          message_type: 'outgoing',
+          content_attributes: { cvg_idempotency_key: 'cvg:1:42:100' },
+          created_at: '2026-08-08T00:01:00.000Z',
+        },
+      ] }),
+    });
+
+    await expect(chatwootClient.findMessageByIdempotencyKey(
+      42,
+      'cvg:1:42:100',
+      'Resposta',
+      new Date('2026-08-08T00:00:00.000Z')
+    )).resolves.toEqual(expect.objectContaining({ id: 801 }));
+  });
+
+  it('fails closed instead of content-matching an unknown response when fallback is disabled', async () => {
+    const original = config.chatwoot.allowContentReconciliationFallback;
+    config.chatwoot.allowContentReconciliationFallback = false;
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ payload: [
+        {
+          id: 803,
+          content: 'Resposta',
+          message_type: 'outgoing',
+          created_at: '2026-08-08T00:01:00.000Z',
+        },
+      ] }),
+    });
+
+    try {
+      await expect(chatwootClient.findMessageByIdempotencyKey(
+        42,
+        'cvg:1:42:100',
+        'Resposta',
+        new Date('2026-08-08T00:00:00.000Z')
+      )).resolves.toBeNull();
+    } finally {
+      config.chatwoot.allowContentReconciliationFallback = original;
+    }
+  });
+
+  it('requires a private outgoing message when reconciling a handoff note', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ payload: [
+        {
+          id: 804,
+          content: 'Resumo interno',
+          message_type: 'outgoing',
+          private: false,
+          content_attributes: { cvg_idempotency_key: 'cvg:handoff:42' },
+        },
+        {
+          id: 805,
+          content: 'Resumo interno',
+          message_type: 'outgoing',
+          private: true,
+          content_attributes: { cvg_idempotency_key: 'cvg:handoff:42' },
+        },
+      ] }),
+    });
+
+    await expect(chatwootClient.findMessageByIdempotencyKey(
+      42,
+      'cvg:handoff:42',
+      'Resumo interno',
+      new Date('2026-08-08T00:00:00.000Z'),
+      { private: true }
+    )).resolves.toEqual(expect.objectContaining({ id: 805 }));
+  });
+
+  it('confirms an inbound message by its Chatwoot message id', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ payload: [{ id: 802, message_type: 'incoming' }] }),
+    });
+
+    await expect(chatwootClient.findMessageById(42, 802))
+      .resolves.toEqual({ id: 802, message_type: 'incoming' });
   });
 
   it('adds labels to conversations', async () => {
@@ -184,11 +299,11 @@ describe('chatwootClient', () => {
       text: async () => 'invalid token',
     });
 
-    await expect(
-      chatwootClient.sendMessage({
-        conversationId: 42,
-        content: 'Mensagem',
-      })
-    ).rejects.toThrow('Chatwoot API error: 401 Unauthorized - invalid token');
+    const request = chatwootClient.sendMessage({
+      conversationId: 42,
+      content: 'Mensagem',
+    });
+    await expect(request).rejects.toThrow('Chatwoot API error: 401 Unauthorized');
+    await expect(request).rejects.not.toThrow('invalid token');
   });
 });

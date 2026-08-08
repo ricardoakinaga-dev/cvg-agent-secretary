@@ -20,6 +20,11 @@ Este índice organiza a documentação do projeto e aponta a baseline válida pa
 - `72_residual_risk_and_go_no_go.md` - riscos residuais e decisão atual
 - `73_post_remediation_reaudit.md` - notas e evidências após a implementação
 - `74_final_remediation_execution_report.md` - consolidacao final da execucao, gates e pendencias externas
+- `75_contact_intake_qdrant_handoff_progress.md` - progresso do intake, Qdrant e handoff enriquecido
+- `76_current_production_readiness_audit.md` - auditoria atual de prontidao para atendimento em producao
+- `77_executive_production_readiness_plan.md` - plano executivo para resolver os bloqueadores atuais
+- `78_production_readiness_roadmap.md` - roadmap de execucao por gates
+- `79_production_readiness_backlog.md` - backlog atual de prontidao para producao
 
 ### Estratégia e arquitetura
 
@@ -69,10 +74,12 @@ Os arquivos abaixo ajudam a entender a evolução do projeto, mas não devem ser
 Em caso de conflito entre documentos, a prioridade é:
 
 1. `72_residual_risk_and_go_no_go.md` para decisão de liberação e riscos atuais
-2. `74_final_remediation_execution_report.md` para evidencias finais desta execucao
-3. `66_remediation_backlog.md` para status detalhado
-4. `65_remediation_roadmap.md` para gates
-5. `64_executive_remediation_plan.md` para decisões executivas
-6. `63_current_project_code_audit.md` para baseline dos achados
+2. `76_current_production_readiness_audit.md` para a baseline dos achados e bloqueadores
+3. `79_production_readiness_backlog.md` para o status detalhado do ciclo atual
+4. `77_executive_production_readiness_plan.md` para a decisao e os criterios executivos
+5. `78_production_readiness_roadmap.md` para gates e sequencia de entrega
+6. `74_final_remediation_execution_report.md` para evidencias finais da execucao anterior
+7. `66_remediation_backlog.md` para o historico da remediacao anterior
+8. `63_current_project_code_audit.md` para a baseline dos achados
 
-*Índice revisado em 02/08/2026.*
+*Índice revisado em 08/08/2026.*

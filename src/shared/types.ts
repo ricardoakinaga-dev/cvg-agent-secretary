@@ -27,7 +27,11 @@ export interface ChatwootWebhookPayload {
   id: number;
   conversation: ChatwootConversation;
   message?: ChatwootMessage;
+  created_at?: number | string;
   content?: string;
+  content_attributes?: {
+    cvg_idempotency_key?: string;
+  };
   message_type?: ChatwootMessageType;
   sender?: ChatwootWebhookSender;
   attachments?: ChatwootAttachment[];
@@ -70,10 +74,14 @@ export interface ChatwootContact {
 export interface ChatwootMessage {
   id: number;
   content: string;
+  content_attributes?: {
+    cvg_idempotency_key?: string;
+  };
   message_type: ChatwootMessageType;
   sender: ChatwootSender;
   attachments?: ChatwootAttachment[];
   private: boolean;
+  created_at?: number | string;
 }
 
 export type ChatwootMessageType = 'incoming' | 'outgoing' | 0 | 1;
@@ -131,8 +139,11 @@ export interface ConversationMetadata {
   lastMessageAt: Date;
   inboxId: number;
   accountId: number;
+  /** PostgreSQL control-state version represented by the Redis snapshot. */
+  controlVersion?: number;
   handoffStartedAt?: string;
   handoffUntil?: string;
+  handoffExpiredAt?: string;
   handoffReason?: string;
   contactIntake?: ContactIntakeState;
 }

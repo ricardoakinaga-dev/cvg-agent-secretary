@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import Redis, { RedisOptions } from 'ioredis';
 import { config } from '../config';
 import { logger } from '../modules/logging';
@@ -12,6 +13,21 @@ const CHATWOOT_WEBHOOK_DELIVERY_PREFIX = `${REDIS_NAMESPACE}:webhook:delivery`;
 const CHATWOOT_WEBHOOK_RECOVERY_BATCH_SIZE = 100;
 const CHATWOOT_WEBHOOK_DLQ_TTL_SECONDS = 7 * 24 * 60 * 60;
 const CHATWOOT_WEBHOOK_DLQ_MAX_ENTRIES = 1_000;
+const CHATWOOT_DELIVERY_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+const SHA256_DIGEST_PATTERN = /^[a-f\d]{64}$/i;
+
+function getRedisDeliveryKey(deliveryId: string): string {
+  if (typeof deliveryId !== 'string' || !CHATWOOT_DELIVERY_ID_PATTERN.test(deliveryId)) {
+    throw new Error('Webhook delivery id must contain 1-64 safe characters');
+  }
+
+  // Chatwoot and test adapters may provide a short opaque identifier. Keep
+  // existing digests stable, while hashing other bounded IDs before using
+  // them as Redis keys.
+  return SHA256_DIGEST_PATTERN.test(deliveryId)
+    ? deliveryId
+    : createHash('sha256').update(deliveryId, 'utf8').digest('hex');
+}
 
 class RedisClient {
   private client: Redis | null = null;
@@ -95,9 +111,7 @@ class RedisClient {
     deliveryId: string,
     ttlSeconds = 24 * 60 * 60
   ): Promise<boolean> {
-    if (!/^[a-f\d]{64}$/i.test(deliveryId)) {
-      throw new Error('Webhook delivery id must be a SHA-256 digest');
-    }
+    const redisDeliveryKey = getRedisDeliveryKey(deliveryId);
     this.assertPositiveInteger(ttlSeconds, 'ttlSeconds');
 
     const script = `
@@ -111,12 +125,23 @@ class RedisClient {
     const enqueued = await this.getClient().eval(
       script,
       2,
-      `${CHATWOOT_WEBHOOK_DELIVERY_PREFIX}:${deliveryId}`,
+      `${CHATWOOT_WEBHOOK_DELIVERY_PREFIX}:${redisDeliveryKey}`,
       CHATWOOT_WEBHOOK_PENDING_KEY,
       String(ttlSeconds),
       serializedJob
     );
     return Number(enqueued) === 1;
+  }
+
+  async enqueueChatwootWebhookReplay(
+    serializedJob: string,
+    receiptId: string,
+    ttlSeconds = 24 * 60 * 60
+  ): Promise<boolean> {
+    const replayDeliveryId = createHash('sha256')
+      .update(`replay.${receiptId}`)
+      .digest('hex');
+    return this.enqueueChatwootWebhookOnce(serializedJob, replayDeliveryId, ttlSeconds);
   }
 
   async claimChatwootWebhook(
@@ -582,6 +607,42 @@ class RedisClient {
     const key = `${REDIS_NAMESPACE}:lock:${resourceId}`;
     const result = await this.getClient().set(key, ownerToken, 'EX', ttlSeconds, 'NX');
     return result === 'OK';
+  }
+
+  async acquireLockWithWait(
+    resourceId: string,
+    ownerToken: string,
+    ttlSeconds = 300,
+    maxWaitMs = 10_000,
+    pollMs = 200
+  ): Promise<boolean> {
+    if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 0) {
+      throw new Error('maxWaitMs must be a non-negative integer');
+    }
+    if (!Number.isSafeInteger(pollMs) || pollMs < 1) {
+      throw new Error('pollMs must be a positive integer');
+    }
+    const deadline = Date.now() + maxWaitMs;
+    do {
+      if (await this.acquireLock(resourceId, ownerToken, ttlSeconds)) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollMs, deadline - Date.now())));
+    } while (Date.now() <= deadline);
+    return false;
+  }
+
+  async renewLock(resourceId: string, ownerToken: string, ttlSeconds = 300): Promise<boolean> {
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1) {
+      throw new Error('ttlSeconds must be a positive integer');
+    }
+    const key = `${REDIS_NAMESPACE}:lock:${resourceId}`;
+    const result = await this.getClient().eval(`
+      if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+        return 0
+      end
+      return redis.call('EXPIRE', KEYS[1], ARGV[2])
+    `, 1, key, ownerToken, String(ttlSeconds));
+    return Number(result) === 1;
   }
 
   async releaseLock(resourceId: string, ownerToken: string): Promise<boolean> {

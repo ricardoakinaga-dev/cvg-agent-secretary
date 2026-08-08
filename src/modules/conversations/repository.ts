@@ -49,6 +49,19 @@ export interface PersistedMessage {
   createdAt: Date;
 }
 
+export type ConversationControlState = 'automated' | 'handoff_pending' | 'handoff_active' | 'completed';
+
+export interface ConversationControl {
+  conversationId: string;
+  state: ConversationControlState;
+  handoffUntil: Date | null;
+  handoffExpiredAt: Date | null;
+  handoffReason: string | null;
+  handoffOwner: string | null;
+  version: number;
+  updatedAt: Date;
+}
+
 type ConversationRow = Record<string, unknown>;
 type MessageRow = Record<string, unknown>;
 
@@ -175,6 +188,34 @@ export class ConversationRepository {
     return result.rows[0] ? this.mapMessage(result.rows[0]) : null;
   }
 
+  async findById(conversationId: string): Promise<PersistedConversation | null> {
+    const result = await query<ConversationRow>(`
+      SELECT * FROM conversations
+      WHERE tenant_id = $1 AND id = $2
+    `, [config.chatwoot.accountId, conversationId]);
+    return result.rows[0] ? this.mapConversation(result.rows[0]) : null;
+  }
+
+  async findByChatwootConversationId(chatwootConversationId: number): Promise<PersistedConversation | null> {
+    const result = await query<ConversationRow>(`
+      SELECT * FROM conversations
+      WHERE tenant_id = $1 AND chatwoot_conversation_id = $2
+    `, [config.chatwoot.accountId, chatwootConversationId]);
+    return result.rows[0] ? this.mapConversation(result.rows[0]) : null;
+  }
+
+  async listMessages(conversationId: string, limit = 50): Promise<PersistedMessage[]> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 200);
+    const result = await query<MessageRow>(`
+      SELECT *
+      FROM messages
+      WHERE tenant_id = $1 AND conversation_id = $2
+      ORDER BY created_at DESC, id DESC
+      LIMIT $3
+    `, [config.chatwoot.accountId, conversationId, safeLimit]);
+    return result.rows.reverse().map((row) => this.mapMessage(row));
+  }
+
   async updateContactIntake(
     conversationId: string,
     intake: ContactIntakeState
@@ -211,6 +252,74 @@ export class ConversationRepository {
     if ((result.rowCount ?? result.rows.length) === 0) {
       throw new Error('Conversation not found for contact intake update');
     }
+  }
+
+  async getControlState(conversationId: string): Promise<ConversationControl | null> {
+    const result = await query<Record<string, unknown>>(`
+      SELECT conversation_id, state, handoff_until, handoff_expired_at, handoff_reason, handoff_owner, version, updated_at
+      FROM conversation_control_state
+      WHERE tenant_id = $1 AND conversation_id = $2
+    `, [config.chatwoot.accountId, conversationId]);
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      conversationId: String(row.conversation_id),
+      state: row.state as ConversationControlState,
+      handoffUntil: row.handoff_until == null ? null : new Date(String(row.handoff_until)),
+      handoffExpiredAt: row.handoff_expired_at == null ? null : new Date(String(row.handoff_expired_at)),
+      handoffReason: row.handoff_reason == null ? null : String(row.handoff_reason),
+      handoffOwner: row.handoff_owner == null ? null : String(row.handoff_owner),
+      version: Number(row.version),
+      updatedAt: new Date(String(row.updated_at)),
+    };
+  }
+
+  async setControlState(
+    conversationId: string,
+    state: ConversationControlState,
+    options: {
+      handoffUntil?: Date | null;
+      handoffExpiredAt?: Date | null;
+      handoffReason?: string | null;
+      handoffOwner?: string | null;
+      expectedVersion?: number;
+    } = {}
+  ): Promise<ConversationControl> {
+    const result = await query<Record<string, unknown>>(`
+      INSERT INTO conversation_control_state (
+        tenant_id, conversation_id, state, handoff_until, handoff_expired_at, handoff_reason, handoff_owner
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (tenant_id, conversation_id) DO UPDATE SET
+        state = EXCLUDED.state,
+        handoff_until = EXCLUDED.handoff_until,
+        handoff_expired_at = EXCLUDED.handoff_expired_at,
+        handoff_reason = EXCLUDED.handoff_reason,
+        handoff_owner = EXCLUDED.handoff_owner,
+        version = conversation_control_state.version + 1
+      WHERE $8::BIGINT IS NULL OR conversation_control_state.version = $8
+      RETURNING conversation_id, state, handoff_until, handoff_expired_at, handoff_reason, handoff_owner, version, updated_at
+    `, [
+      config.chatwoot.accountId,
+      conversationId,
+      state,
+      options.handoffUntil ?? null,
+      options.handoffExpiredAt ?? null,
+      options.handoffReason ? maskSensitiveData(options.handoffReason).slice(0, 500) : null,
+      options.handoffOwner ?? null,
+      options.expectedVersion ?? null,
+    ]);
+    const row = result.rows[0];
+    if (!row) throw new Error('Conversation control state version conflict');
+    return {
+      conversationId: String(row.conversation_id),
+      state: row.state as ConversationControlState,
+      handoffUntil: row.handoff_until == null ? null : new Date(String(row.handoff_until)),
+      handoffExpiredAt: row.handoff_expired_at == null ? null : new Date(String(row.handoff_expired_at)),
+      handoffReason: row.handoff_reason == null ? null : String(row.handoff_reason),
+      handoffOwner: row.handoff_owner == null ? null : String(row.handoff_owner),
+      version: Number(row.version),
+      updatedAt: new Date(String(row.updated_at)),
+    };
   }
 
   private mapConversation(row: ConversationRow): PersistedConversation {

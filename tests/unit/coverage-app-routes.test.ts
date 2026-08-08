@@ -1,4 +1,4 @@
-import { createHmac } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 import http from 'http';
 import { AddressInfo } from 'net';
 
@@ -78,7 +78,7 @@ function stats(overrides: Partial<EventStats> = {}): EventStats {
   };
 }
 
-function signedWebhook(): { body: string; timestamp: string; signature: string } {
+function signedWebhook(): { body: string; timestamp: string; signature: string; deliveryId: string } {
   const body = JSON.stringify({
     event: 'message_created',
     message: {
@@ -103,7 +103,7 @@ function signedWebhook(): { body: string; timestamp: string; signature: string }
   const signature = `sha256=${createHmac('sha256', 'test-webhook-secret')
     .update(`${timestamp}.${body}`)
     .digest('hex')}`;
-  return { body, timestamp, signature };
+  return { body, timestamp, signature, deliveryId: 'chatwoot-delivery-123' };
 }
 
 describe('application reporting and failure branches', () => {
@@ -336,13 +336,14 @@ describe('application reporting and failure branches', () => {
           'Content-Type': 'application/json',
           'x-chatwoot-signature': webhook.signature,
           'x-chatwoot-timestamp': webhook.timestamp,
+          'x-chatwoot-delivery': webhook.deliveryId,
           'x-correlation-id': 'request-123',
         },
         body: webhook.body,
       });
       expect(response.status).toBe(202);
       await expect(response.json()).resolves.toEqual({ success: true, queued: false, duplicate: true });
-      expect(appMocks.enqueue).toHaveBeenCalledWith(expect.any(Object), 'request-123', expect.any(String));
+      expect(appMocks.enqueue).toHaveBeenCalledWith(expect.any(Object), 'request-123', webhook.deliveryId);
     });
   });
 
@@ -365,6 +366,15 @@ describe('application reporting and failure branches', () => {
         success: false,
         error: 'Webhook queue unavailable',
       });
+      expect(appMocks.enqueue).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.any(String),
+        createHash('sha256')
+          .update(webhook.timestamp)
+          .update('.')
+          .update(webhook.body)
+          .digest('hex')
+      );
     });
   });
 

@@ -58,4 +58,34 @@ describe('Redis runtime claims', () => {
       'owner-2'
     );
   });
+
+  it('renews a conversation lock only when the owner token still matches', async () => {
+    redis.eval.mockResolvedValueOnce(1);
+
+    await expect(redisClient.renewLock('runtime:conversation-1', 'owner-1', 45)).resolves.toBe(true);
+
+    expect(redis.eval).toHaveBeenCalledWith(
+      expect.stringContaining("redis.call('EXPIRE', KEYS[1], ARGV[2])"),
+      1,
+      'cvg:1:lock:runtime:conversation-1',
+      'owner-1',
+      '45'
+    );
+  });
+
+  it('derives a stable replay identity from a durable receipt', async () => {
+    redis.eval.mockResolvedValueOnce(1);
+
+    await expect(redisClient.enqueueChatwootWebhookReplay('{"event":"message_created"}', 'receipt-1'))
+      .resolves.toBe(true);
+
+    expect(redis.eval).toHaveBeenCalledWith(
+      expect.any(String),
+      2,
+      expect.stringMatching(/^cvg:1:webhook:delivery:[0-9a-f]{64}$/),
+      'cvg:1:queue:chatwoot:webhooks:pending',
+      '86400',
+      '{"event":"message_created"}'
+    );
+  });
 });

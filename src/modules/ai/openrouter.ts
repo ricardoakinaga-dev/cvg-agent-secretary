@@ -90,8 +90,8 @@ export class OpenRouterProvider implements AIProvider {
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenRouter API error: ${response.status} - ${errorText}`);
+        await response.text().catch(() => undefined);
+        throw new Error(`OpenRouter API error: ${response.status}`);
       }
 
       const data = await response.json() as OpenRouterResponse;

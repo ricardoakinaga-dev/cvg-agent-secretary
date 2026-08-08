@@ -20,12 +20,16 @@ O projeto inclui:
 - suíte determinística de segurança clínica e CI com audit/SBOM.
 - API de privacidade governada por policy, checkpoint, RBAC e comprovantes auditáveis.
 
-A fonte de verdade da remediação é:
+A fonte de verdade da prontidão atual é:
 
-- [Auditoria atual](docs/63_current_project_code_audit.md)
-- [Plano executivo](docs/64_executive_remediation_plan.md)
-- [Roadmap](docs/65_remediation_roadmap.md)
-- [Backlog rastreável](docs/66_remediation_backlog.md)
+- [Auditoria atual](docs/76_current_production_readiness_audit.md)
+- [Plano executivo](docs/77_executive_production_readiness_plan.md)
+- [Roadmap](docs/78_production_readiness_roadmap.md)
+- [Backlog rastreável](docs/79_production_readiness_backlog.md)
+
+O estado atual permanece **NO-GO para atendimento autônomo de clientes reais**
+até a homologação externa do fluxo Chatwoot/EvolutionAPI/WhatsApp, dos
+secrets/TLS/rede, da privacidade e da operação.
 
 ## Requisitos
 
@@ -43,6 +47,12 @@ npm ci
 npm run typecheck
 npm test
 npm run dev
+```
+
+Para verificar artefatos exportados antes de compartilhá-los:
+
+```bash
+npm run security:scan-artifacts -- .env.example package.json
 ```
 
 Os valores de `.env.example` são exemplos e não devem ser usados em produção.

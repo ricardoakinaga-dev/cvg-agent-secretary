@@ -18,6 +18,9 @@ export type Permission =
   | 'audit:read'
   | 'privacy:read'
   | 'privacy:delete'
+  | 'webhooks:replay'
+  | 'responses:reconcile'
+  | 'tools:reconcile'
   | 'users:read'
   | 'users:write'
   | 'settings:read'
@@ -40,6 +43,9 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'audit:read',
     'privacy:read',
     'privacy:delete',
+    'webhooks:replay',
+    'responses:reconcile',
+    'tools:reconcile',
     'users:read',
     'users:write',
     'settings:read',
@@ -57,6 +63,8 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     'analytics:read',
     'analytics:export',
     'audit:read',
+    'responses:reconcile',
+    'tools:reconcile',
     'users:read',
     'settings:read',
   ],

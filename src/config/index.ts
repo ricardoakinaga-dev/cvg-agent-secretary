@@ -19,6 +19,8 @@ export interface DatabaseConfig {
 export interface AppConfig {
   nodeEnv: string;
   isProduction: boolean;
+  autonomousAgentEnabled: boolean;
+  productionGoLiveApproved: boolean;
   port: number;
   trustProxyHops: number;
   database: DatabaseConfig;
@@ -58,6 +60,9 @@ export interface AppConfig {
     accountId: string;
     inboxIds: number[];
     webhookSecret: string;
+    confirmInboundMessages: boolean;
+    allowContentReconciliationFallback: boolean;
+    allowContentTakeoverFallback: boolean;
   };
   auth: {
     apiToken: string;
@@ -68,12 +73,16 @@ export interface AppConfig {
   };
   conversation: {
     handoffTimeoutMinutes: number;
+    lockTtlSeconds: number;
+    lockWaitMs: number;
+    lockPollMs: number;
   };
   logging: {
     level: string;
   };
   privacy: {
     enabled: boolean;
+    automaticPurgeEnabled: boolean;
     retentionPoliciesJson: string;
     recoveryCheckpointsJson: string;
     qdrantAttestationId: string;
@@ -136,6 +145,15 @@ function urlUsesTls(urlValue: string, secureProtocol: string): boolean {
   }
 }
 
+function isHttpUrl(urlValue: string): boolean {
+  try {
+    const protocol = new URL(urlValue).protocol;
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function databaseRequiresVerifiedTls(urlValue: string): boolean {
   try {
     const sslMode = new URL(urlValue).searchParams.get('sslmode');
@@ -161,6 +179,8 @@ const nodeEnv = getOptionalEnv('NODE_ENV', 'development');
 export const config: AppConfig = {
   nodeEnv,
   isProduction: nodeEnv === 'production',
+  autonomousAgentEnabled: getOptionalEnv('AUTONOMOUS_AGENT_ENABLED', 'false') === 'true',
+  productionGoLiveApproved: getOptionalEnv('PRODUCTION_GO_LIVE_APPROVED', 'false') === 'true',
   port: parseInt(getOptionalEnv('PORT', '3000'), 10),
   trustProxyHops: parseInt(getOptionalEnv('TRUST_PROXY_HOPS', '0'), 10),
   database: {
@@ -205,6 +225,15 @@ export const config: AppConfig = {
     accountId: getRequiredEnv('CHATWOOT_ACCOUNT_ID'),
     inboxIds: parseIntegerList(getRequiredEnv('CHATWOOT_INBOX_IDS')),
     webhookSecret: getOptionalEnv('CHATWOOT_WEBHOOK_SECRET', ''),
+    confirmInboundMessages: getOptionalEnv('CHATWOOT_CONFIRM_INBOUND_MESSAGES', 'false') === 'true',
+    allowContentReconciliationFallback: getOptionalEnv(
+      'CHATWOOT_ALLOW_CONTENT_RECONCILIATION_FALLBACK',
+      nodeEnv === 'production' ? 'false' : 'true'
+    ) === 'true',
+    allowContentTakeoverFallback: getOptionalEnv(
+      'CHATWOOT_ALLOW_CONTENT_TAKEOVER_FALLBACK',
+      nodeEnv === 'production' ? 'false' : 'true'
+    ) === 'true',
   },
   auth: {
     apiToken: getOptionalEnv('API_ADMIN_TOKEN', ''),
@@ -215,12 +244,16 @@ export const config: AppConfig = {
   },
   conversation: {
     handoffTimeoutMinutes: parseInt(getOptionalEnv('HANDOFF_TIMEOUT_MINUTES', '10'), 10),
+    lockTtlSeconds: parseInt(getOptionalEnv('CONVERSATION_LOCK_TTL_SECONDS', '300'), 10),
+    lockWaitMs: parseInt(getOptionalEnv('CONVERSATION_LOCK_WAIT_MS', '10000'), 10),
+    lockPollMs: parseInt(getOptionalEnv('CONVERSATION_LOCK_POLL_MS', '200'), 10),
   },
   logging: {
     level: getOptionalEnv('LOG_LEVEL', 'info'),
   },
   privacy: {
     enabled: getOptionalEnv('PRIVACY_ENABLED', 'false') === 'true',
+    automaticPurgeEnabled: getOptionalEnv('PRIVACY_AUTOMATIC_PURGE_ENABLED', 'false') === 'true',
     retentionPoliciesJson: getOptionalEnv('PRIVACY_RETENTION_POLICIES_JSON', '[]'),
     recoveryCheckpointsJson: getOptionalEnv('PRIVACY_RECOVERY_CHECKPOINTS_JSON', '[]'),
     qdrantAttestationId: getOptionalEnv('PRIVACY_QDRANT_ATTESTATION_ID', ''),
@@ -254,6 +287,10 @@ const privacyRetentionResources: Readonly<Record<string, ReadonlySet<string>>> =
     'analytics_events',
     'response_feedback',
     'audit_logs',
+    'inbound_receipts',
+    'response_outbox',
+    'conversation_control_state',
+    'scheduling_state',
   ]),
   redis: new Set(['webhook_dlq']),
 };
@@ -345,6 +382,27 @@ export function validateConfig(): { valid: boolean; errors: string[] } {
     errors.push('DB_MAX_CONNECTIONS must be an integer between 1 and 100');
   }
   if (config.isProduction) {
+    if (!config.autonomousAgentEnabled) {
+      errors.push('AUTONOMOUS_AGENT_ENABLED must be true in production after the go-live gate is approved');
+    }
+    if (config.autonomousAgentEnabled && !config.productionGoLiveApproved) {
+      errors.push('PRODUCTION_GO_LIVE_APPROVED must be true when autonomous agent is enabled');
+    }
+    if (!config.chatwoot.confirmInboundMessages) {
+      errors.push('CHATWOOT_CONFIRM_INBOUND_MESSAGES must be true in production');
+    }
+    if (config.chatwoot.allowContentReconciliationFallback) {
+      errors.push('CHATWOOT_ALLOW_CONTENT_RECONCILIATION_FALLBACK must be false in production');
+    }
+    if (config.chatwoot.allowContentTakeoverFallback) {
+      errors.push('CHATWOOT_ALLOW_CONTENT_TAKEOVER_FALLBACK must be false in production');
+    }
+    if (!config.privacy.enabled) {
+      errors.push('PRIVACY_ENABLED must be true in production');
+    }
+    if (!config.privacy.automaticPurgeEnabled) {
+      errors.push('PRIVACY_AUTOMATIC_PURGE_ENABLED must be true in production');
+    }
     if (['postgres', 'root'].includes(config.database.user.toLowerCase())) {
       errors.push('DATABASE_URL must use a least-privilege application role in production');
     }
@@ -400,6 +458,16 @@ export function validateConfig(): { valid: boolean; errors: string[] } {
     }
   }
   if (!config.chatwoot.apiToken) errors.push('CHATWOOT_API_TOKEN is required');
+  if (!isHttpUrl(config.chatwoot.apiUrl)) {
+    errors.push('CHATWOOT_API_URL must be a valid http(s) URL');
+  }
+  if (
+    config.isProduction
+    && !config.database.allowInsecurePrivateNetwork
+    && !urlUsesTls(config.chatwoot.apiUrl, 'https:')
+  ) {
+    errors.push('CHATWOOT_API_URL must use HTTPS in production');
+  }
   if (!/^\d+$/.test(config.chatwoot.accountId) || Number(config.chatwoot.accountId) < 1) {
     errors.push('CHATWOOT_ACCOUNT_ID must be a positive integer');
   }
@@ -435,6 +503,15 @@ export function validateConfig(): { valid: boolean; errors: string[] } {
   if (!Number.isFinite(config.conversation.handoffTimeoutMinutes) || config.conversation.handoffTimeoutMinutes < 1) {
     errors.push('HANDOFF_TIMEOUT_MINUTES must be a positive number');
   }
+  if (!Number.isSafeInteger(config.conversation.lockTtlSeconds) || config.conversation.lockTtlSeconds < 1) {
+    errors.push('CONVERSATION_LOCK_TTL_SECONDS must be a positive integer');
+  }
+  if (!Number.isSafeInteger(config.conversation.lockWaitMs) || config.conversation.lockWaitMs < 0) {
+    errors.push('CONVERSATION_LOCK_WAIT_MS must be a non-negative integer');
+  }
+  if (!Number.isSafeInteger(config.conversation.lockPollMs) || config.conversation.lockPollMs < 1) {
+    errors.push('CONVERSATION_LOCK_POLL_MS must be a positive integer');
+  }
 
   if (config.isProduction) {
     if (!config.auth.jwtPublicKey) errors.push('API_JWT_PUBLIC_KEY is required in production');
@@ -459,6 +536,8 @@ export function getSafeConfig(): Record<string, unknown> {
   return {
     nodeEnv: config.nodeEnv,
     isProduction: config.isProduction,
+    autonomousAgentEnabled: config.autonomousAgentEnabled,
+    productionGoLiveApproved: config.productionGoLiveApproved,
     port: config.port,
     trustProxyHops: config.trustProxyHops,
     database: {
@@ -495,6 +574,9 @@ export function getSafeConfig(): Record<string, unknown> {
       apiUrl: config.chatwoot.apiUrl,
       accountId: config.chatwoot.accountId,
       inboxIds: config.chatwoot.inboxIds,
+      confirmInboundMessages: config.chatwoot.confirmInboundMessages,
+      allowContentReconciliationFallback: config.chatwoot.allowContentReconciliationFallback,
+      allowContentTakeoverFallback: config.chatwoot.allowContentTakeoverFallback,
     },
     auth: {
       apiTokenConfigured: Boolean(config.auth.apiToken),

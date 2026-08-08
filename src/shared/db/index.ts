@@ -75,7 +75,11 @@ export async function checkDatabaseConnection(): Promise<boolean> {
         to_regclass('public.appointment_services') IS NOT NULL AND
         to_regclass('public.appointment_providers') IS NOT NULL AND
         to_regclass('public.appointment_slots') IS NOT NULL AND
-        to_regclass('public.appointments') IS NOT NULL
+        to_regclass('public.appointments') IS NOT NULL AND
+        to_regclass('public.inbound_receipts') IS NOT NULL AND
+        to_regclass('public.response_outbox') IS NOT NULL AND
+        to_regclass('public.conversation_control_state') IS NOT NULL AND
+        to_regclass('public.conversation_scheduling_state') IS NOT NULL
       THEN 1 ELSE 0 END AS check
     `);
     return result.rowCount === 1 && result.rows[0]?.check === 1;

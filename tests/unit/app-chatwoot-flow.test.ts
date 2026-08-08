@@ -1,6 +1,6 @@
 import http from 'http';
 import { AddressInfo } from 'net';
-import { createHash, createHmac } from 'crypto';
+import { createHmac } from 'crypto';
 import { ChatwootWebhookPayload, ConversationContext } from '../../src/shared/types';
 
 const mockRedis = vi.hoisted(() => ({
@@ -101,7 +101,7 @@ vi.mock('../../src/modules/audit/service', () => ({
   auditService: { recordEvent: vi.fn() },
 }));
 vi.mock('../../src/modules/handoff/repository', () => ({
-  handoffRepository: { create: vi.fn() },
+  handoffRepository: { create: vi.fn(), findByConversation: vi.fn(async () => null), updateStatus: vi.fn() },
 }));
 vi.mock('../../src/modules/chatwoot/integration', () => ({
   executeHandoff: vi.fn(),
@@ -188,7 +188,12 @@ function createConversationContext(): ConversationContext {
   };
 }
 
-function createSignedPayload(content: string): { body: string; signature: string; timestamp: string } {
+function createSignedPayload(content: string): {
+  body: string;
+  signature: string;
+  timestamp: string;
+  deliveryId: string;
+} {
   const payload: ChatwootWebhookPayload = {
     id: 1,
     event: 'message_created',
@@ -217,7 +222,12 @@ function createSignedPayload(content: string): { body: string; signature: string
   };
   const body = JSON.stringify(payload);
   const timestamp = Math.floor(Date.now() / 1000).toString();
-  return { body, signature: signBody(body, timestamp), timestamp };
+  return {
+    body,
+    signature: signBody(body, timestamp),
+    timestamp,
+    deliveryId: 'chatwoot-delivery-flow-123',
+  };
 }
 
 describe('signed Chatwoot webhook to agent response flow', () => {
@@ -283,10 +293,10 @@ describe('signed Chatwoot webhook to agent response flow', () => {
   it('queues a signed webhook before the worker retrieves knowledge, calls AI, and responds through Chatwoot', async () => {
     let signedRequest: ReturnType<typeof createSignedPayload> | undefined;
     await withServer(async (baseUrl) => {
-      const { body, signature, timestamp } = createSignedPayload(
+      const { body, signature, timestamp, deliveryId } = createSignedPayload(
         'Sou tutora e quero agendar consulta para o Buddy'
       );
-      signedRequest = { body, signature, timestamp };
+      signedRequest = { body, signature, timestamp, deliveryId };
 
       const response = await fetch(`${baseUrl}/webhooks/chatwoot`, {
         method: 'POST',
@@ -294,6 +304,7 @@ describe('signed Chatwoot webhook to agent response flow', () => {
           'Content-Type': 'application/json',
           'x-chatwoot-signature': signature,
           'x-chatwoot-timestamp': timestamp,
+          'x-chatwoot-delivery': deliveryId,
         },
         body,
       });
@@ -305,18 +316,14 @@ describe('signed Chatwoot webhook to agent response flow', () => {
     expect(mockWebhookWorker.enqueue).toHaveBeenCalledWith(
       expect.any(Object),
       expect.any(String),
-      createHash('sha256')
-        .update(signedRequest!.timestamp)
-        .update('.')
-        .update(signedRequest!.body)
-        .digest('hex')
+      signedRequest!.deliveryId
     );
 
     const [queuedPayload] = mockWebhookWorker.enqueue.mock.calls[0] as [ChatwootWebhookPayload];
     await processWebhookEvent(queuedPayload);
 
-    expect(mockRedis.claimMessageHash).toHaveBeenCalledOnce();
-    expect(mockRedis.claimContentHash).toHaveBeenCalledOnce();
+    expect(mockRedis.claimMessageHash).not.toHaveBeenCalled();
+    expect(mockRedis.claimContentHash).not.toHaveBeenCalled();
     expect(mockRedis.releaseLock).toHaveBeenCalledOnce();
     expect(mockKnowledgeRetrieval.search).toHaveBeenCalledWith({
       query: 'Perfil do contato: tutor. Motivo do contato: quero agendar consulta para o Buddy.',

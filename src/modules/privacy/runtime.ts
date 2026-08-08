@@ -18,7 +18,7 @@ const policiesSchema = z.array(z.object({
   batchSize: z.number(),
 })).min(1);
 
-export function createPrivacyRuntime() {
+export function createPrivacyService(): PrivacyLifecycleService {
   let rawPolicies: unknown;
   try {
     rawPolicies = JSON.parse(config.privacy.retentionPoliciesJson);
@@ -42,5 +42,48 @@ export function createPrivacyRuntime() {
     policies,
   });
 
-  return createPrivacyRouter(service, () => config.chatwoot.accountId);
+  return service;
+}
+
+export function createPrivacyRuntime() {
+  return createPrivacyRouter(createPrivacyService(), () => config.chatwoot.accountId);
+}
+
+export async function runAutomatedRetentionPurge(now = new Date()): Promise<void> {
+  if (!config.privacy.enabled || !config.privacy.automaticPurgeEnabled) return;
+
+  let checkpoints: unknown;
+  try {
+    checkpoints = JSON.parse(config.privacy.recoveryCheckpointsJson);
+  } catch {
+    throw new Error('Privacy recovery checkpoints are invalid JSON');
+  }
+  const checkpoint = Array.isArray(checkpoints)
+    ? checkpoints.find((candidate) => (
+      candidate
+      && typeof candidate === 'object'
+      && (candidate as Record<string, unknown>).tenantId === config.chatwoot.accountId
+      && (candidate as Record<string, unknown>).verified === true
+    )) as Record<string, unknown> | undefined
+    : undefined;
+  if (!checkpoint || typeof checkpoint.id !== 'string') {
+    throw new Error('No verified privacy recovery checkpoint is configured for the tenant');
+  }
+
+  const service = createPrivacyService();
+  const day = now.toISOString().slice(0, 10);
+  const actorId = 'privacy-retention-scheduler';
+  const preview = await service.previewRetention({
+    tenantId: config.chatwoot.accountId,
+    actorId,
+    idempotencyKey: `privacy:preview:${day}`,
+  });
+  await service.purgeRetention({
+    tenantId: config.chatwoot.accountId,
+    actorId,
+    idempotencyKey: `privacy:purge:${day}`,
+    approvedPreviewReceiptId: preview.receipt.id,
+    recoveryCheckpointId: checkpoint.id,
+    confirm: true,
+  });
 }

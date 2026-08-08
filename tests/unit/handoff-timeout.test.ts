@@ -12,6 +12,11 @@ const mockHandoffRepository = vi.hoisted(() => ({
   cancelPendingByConversation: vi.fn(),
 }));
 
+const mockConversationRepository = vi.hoisted(() => ({
+  getControlState: vi.fn(),
+  setControlState: vi.fn(),
+}));
+
 vi.mock('../../src/shared/redis', () => ({
   redisClient: mockRedis,
 }));
@@ -22,6 +27,10 @@ vi.mock('../../src/modules/chatwoot/client', () => ({
 
 vi.mock('../../src/modules/handoff/repository', () => ({
   handoffRepository: mockHandoffRepository,
+}));
+
+vi.mock('../../src/modules/conversations/repository', () => ({
+  conversationRepository: mockConversationRepository,
 }));
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -59,6 +68,8 @@ describe('handoff timeout', () => {
     mockRedis.listConversationStates.mockResolvedValue([]);
     mockChatwoot.removeLabels.mockResolvedValue(undefined);
     mockHandoffRepository.cancelPendingByConversation.mockResolvedValue(1);
+    mockConversationRepository.getControlState.mockResolvedValue(undefined);
+    mockConversationRepository.setControlState.mockResolvedValue({ version: 5 });
   });
 
   it('expires legacy handoff states without handoffUntil', () => {
@@ -87,7 +98,7 @@ describe('handoff timeout', () => {
     expect(isHandoffExpired(context, new Date('2026-06-10T20:09:59.000Z'))).toBe(false);
   });
 
-  it('resumes automation and removes temporary Chatwoot labels after timeout', async () => {
+  it('keeps automation blocked after timeout until an operator resolves the handoff', async () => {
     const context = createContext({
       metadata: {
         ...createContext().metadata,
@@ -101,18 +112,27 @@ describe('handoff timeout', () => {
       resetExpiredHandoff(context, new Date('2026-06-10T20:10:01.000Z'))
     ).resolves.toBe(true);
 
-    expect(context.state).toBe('in_progress');
-    expect(context.metadata.handoffStartedAt).toBeUndefined();
+    expect(context.state).toBe('handoff');
+    expect(context.metadata.handoffStartedAt).toBe('2026-06-10T20:00:00.000Z');
     expect(context.metadata.handoffUntil).toBeUndefined();
-    expect(context.metadata.handoffReason).toBeUndefined();
+    expect(context.metadata.handoffExpiredAt).toBe('2026-06-10T20:10:01.000Z');
+    expect(context.metadata.handoffReason).toContain('continua bloqueada');
     expect(mockRedis.setConversationState).toHaveBeenCalledWith(
       'chatwoot-1',
-      expect.objectContaining({ state: 'in_progress' })
+      expect.objectContaining({ state: 'handoff' })
     );
-    expect(mockChatwoot.removeLabels).toHaveBeenCalledWith(1, ['handoff', 'pending']);
+    expect(mockChatwoot.removeLabels).not.toHaveBeenCalled();
     expect(mockHandoffRepository.cancelPendingByConversation).toHaveBeenCalledWith(
       'chatwoot-1',
-      'Handoff expirado; automacao retomada'
+      'Handoff expirado; automacao continua bloqueada ate resolucao humana'
+    );
+    expect(mockConversationRepository.setControlState).toHaveBeenCalledWith(
+      'chatwoot-1',
+      'handoff_active',
+      expect.objectContaining({
+        handoffUntil: null,
+        handoffExpiredAt: new Date('2026-06-10T20:10:01.000Z'),
+      })
     );
   });
 
@@ -153,10 +173,31 @@ describe('handoff timeout', () => {
 
     await expect(sweepExpiredHandoffs(new Date('2026-06-10T20:10:01.000Z'))).resolves.toBe(1);
 
-    expect(mockChatwoot.removeLabels).toHaveBeenCalledWith(1, ['handoff', 'pending']);
+    expect(mockChatwoot.removeLabels).not.toHaveBeenCalled();
     expect(mockRedis.setConversationState).toHaveBeenCalledWith(
       'chatwoot-1',
-      expect.objectContaining({ state: 'in_progress' })
+      expect.objectContaining({ state: 'handoff' })
     );
+  });
+
+  it('does not expire a stale Redis handoff after an operator already resumed it', async () => {
+    mockConversationRepository.getControlState.mockResolvedValue({
+      state: 'automated',
+      version: 9,
+    });
+    const context = createContext({
+      metadata: {
+        ...createContext().metadata,
+        handoffUntil: '2026-06-10T20:10:00.000Z',
+      },
+    });
+
+    await expect(
+      resetExpiredHandoff(context, new Date('2026-06-10T20:10:01.000Z'))
+    ).resolves.toBe(false);
+
+    expect(mockHandoffRepository.cancelPendingByConversation).not.toHaveBeenCalled();
+    expect(mockConversationRepository.setControlState).not.toHaveBeenCalled();
+    expect(mockRedis.setConversationState).not.toHaveBeenCalled();
   });
 });

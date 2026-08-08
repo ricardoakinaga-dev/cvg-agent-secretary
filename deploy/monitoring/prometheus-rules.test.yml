@@ -25,6 +25,12 @@ tests:
         values: '20x20'
       - series: 'cvg:slo_webhook_error_budget_burn:rate6h{environment="test"}'
         values: '10x20'
+      - series: 'cvg:response_outbox_unknown_increase:10m{environment="test"}'
+        values: '1x20'
+      - series: 'cvg:handoff_failure_increase:10m{environment="test"}'
+        values: '1x20'
+      - series: 'cvg:context_version_conflict_increase:10m{environment="test"}'
+        values: '1x20'
 
     alert_rule_test:
       - eval_time: 1m
@@ -97,4 +103,34 @@ tests:
               owner: backend
             exp_annotations:
               summary: Webhook success SLO is consuming error budget rapidly
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 1m
+        alertname: CvgResponseDeliveryUnknown
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: critical
+              owner: backend
+            exp_annotations:
+              summary: A Chatwoot response has unknown external delivery state
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 1m
+        alertname: CvgHandoffReconciliationFailure
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: critical
+              owner: operations
+            exp_annotations:
+              summary: A human handoff requires external reconciliation
+              runbook: docs/71_security_operations_and_recovery_runbook.md
+      - eval_time: 6m
+        alertname: CvgContextVersionConflict
+        exp_alerts:
+          - exp_labels:
+              environment: test
+              severity: warning
+              owner: backend
+            exp_annotations:
+              summary: A Redis conversation snapshot was stale against PostgreSQL
               runbook: docs/71_security_operations_and_recovery_runbook.md

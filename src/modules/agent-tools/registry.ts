@@ -12,6 +12,8 @@ import { setSchedulingState } from '../scheduling/state';
 import { logger } from '../logging';
 import { agentToolInputSchemas } from './validation';
 import type { ZodTypeAny } from 'zod';
+import { createHash } from 'node:crypto';
+import { toolExecutionRepository } from './executionRepository';
 
 export interface AgentToolContext {
   conversationId?: string;
@@ -19,6 +21,8 @@ export interface AgentToolContext {
   contactName?: string;
   /** Current user-authored turn; never populated from model tool arguments. */
   userMessage?: string;
+  /** Chatwoot message identity used to fence mutating tool side effects. */
+  turnId?: string;
 }
 
 export type AgentToolName =
@@ -94,6 +98,14 @@ const USER_AUTHORIZED_MUTATIONS = new Set<AgentToolName>([
   ...SCHEDULING_MUTATIONS,
   'notify_sector',
 ]);
+
+function toolIdempotencyKey(toolName: AgentToolName, args: JsonRecord, context: AgentToolContext): string | null {
+  if (!context.turnId || !context.conversationId) return null;
+  const digest = createHash('sha256')
+    .update(JSON.stringify({ toolName, args }))
+    .digest('hex');
+  return `tool:${context.conversationId}:${context.turnId}:${digest}`.slice(0, 200);
+}
 
 function normalizeUserMessage(message: string): string {
   return message
@@ -367,16 +379,30 @@ const tools: AgentToolDefinition[] = [
         },
       },
     },
-    execute: (args, context) => {
+    execute: async (args, context) => {
       const ownership = getAppointmentOwnership(context);
       if (!ownership) return Promise.resolve(ownershipFailure());
 
-      return rescheduleAppointment({
+      const result = await rescheduleAppointment({
         appointmentId: readString(args, 'appointmentId') || '',
         slotId: readString(args, 'slotId') || '',
         ...ownership,
         reason: readString(args, 'reason'),
       });
+
+      if (result.success && result.appointment) {
+        await setSchedulingState(ownership.conversationId, {
+          stage: 'waiting_slot_confirmation',
+          appointmentId: result.appointment.id,
+          slotId: result.appointment.slotId,
+          serviceId: result.appointment.serviceId || undefined,
+          petName: result.appointment.petName,
+          contactId: ownership.contactId,
+          lastIntent: 'reagendamento',
+        });
+      }
+
+      return result;
     },
   },
   {
@@ -492,9 +518,39 @@ export async function executeAgentTool(
     return { success: false, message: 'User confirmation is required' };
   }
 
+  const mutating = SCHEDULING_MUTATIONS.has(tool.name) || tool.name === 'create_handoff' || tool.name === 'notify_sector';
+  const idempotencyKey = mutating ? toolIdempotencyKey(tool.name, validation.data as JsonRecord, context) : null;
+  let executionId: string | undefined;
+  const executionStartedAt = Date.now();
+  if (idempotencyKey) {
+    const claim = await toolExecutionRepository.claim({
+      conversationId: context.conversationId as string,
+      contactId: context.contactId,
+      toolName: tool.name,
+      toolInput: validation.data,
+      idempotencyKey,
+    });
+    if (claim.state === 'completed') return claim.output;
+    if (claim.state === 'pending') {
+      return { success: false, message: 'Tool execution requires reconciliation before retry' };
+    }
+    executionId = claim.id;
+  }
+
   try {
-    return await tool.execute(validation.data as JsonRecord, context);
+    const result = await tool.execute(validation.data as JsonRecord, context);
+    if (executionId) {
+      await toolExecutionRepository.complete(executionId, result, Date.now() - executionStartedAt);
+    }
+    return result;
   } catch (error) {
+    if (executionId) {
+      await toolExecutionRepository.fail(
+        executionId,
+        error instanceof Error ? error.message : String(error),
+        Date.now() - executionStartedAt
+      );
+    }
     logger.error('Agent tool execution failed', error as Error, { toolName: name });
     return {
       success: false,
