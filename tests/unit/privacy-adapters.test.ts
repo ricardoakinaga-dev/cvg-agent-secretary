@@ -68,6 +68,41 @@ describe('privacy store adapters', () => {
     expect(client.query).not.toHaveBeenCalled();
   });
 
+  it('purges composite-key retention resources without assuming an id column', async () => {
+    const client = queryClient();
+    const adapter = new PostgresPrivacyStoreAdapter({
+      withClient: async (work) => work(client),
+      withTransaction: async (work) => work(client),
+    });
+
+    await adapter.purgeRetention({
+      ...retentionContext,
+      operation: 'retention_purge',
+      resource: 'conversation_control_state',
+    });
+
+    const sql = String(vi.mocked(client.query).mock.calls[0][0]);
+    expect(sql).toContain('WHERE (tenant_id, conversation_id) IN');
+    expect(sql).toContain('SELECT tenant_id, conversation_id FROM conversation_control_state');
+    expect(sql).not.toContain('WHERE (id) IN');
+  });
+
+  it('includes durable scheduling state in the privacy retention allowlist', async () => {
+    const client = queryClient();
+    const adapter = new PostgresPrivacyStoreAdapter({
+      withClient: async (work) => work(client),
+      withTransaction: async (work) => work(client),
+    });
+
+    await adapter.previewRetention({
+      ...retentionContext,
+      resource: 'scheduling_state',
+    });
+
+    expect(String(vi.mocked(client.query).mock.calls[0][0]))
+      .toContain('FROM conversation_scheduling_state');
+  });
+
   it('keeps subject export queries tenant-scoped', async () => {
     const client = queryClient();
     const adapter = new PostgresPrivacyStoreAdapter({

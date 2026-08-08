@@ -28,6 +28,11 @@ jobs:
     env:
       AGENT_BASE_URL: ${{ secrets.STAGING_AGENT_BASE_URL }}
       CHATWOOT_WEBHOOK_SECRET: ${{ secrets.STAGING_CHATWOOT_WEBHOOK_SECRET }}
+      # The real-message branch is enabled only when a persisted Chatwoot
+      # message ID is provisioned. Without it, the workflow remains a
+      # contract smoke and must not silently claim end-to-end processing.
+      CHATWOOT_API_URL: ${{ secrets.STAGING_CHATWOOT_MESSAGE_ID != '' && secrets.STAGING_CHATWOOT_API_URL || '' }}
+      CHATWOOT_API_TOKEN: ${{ secrets.STAGING_CHATWOOT_MESSAGE_ID != '' && secrets.STAGING_CHATWOOT_API_TOKEN || '' }}
       SMOKE_CHATWOOT_CONVERSATION_ID: ${{ secrets.STAGING_CHATWOOT_CONVERSATION_ID }}
       SMOKE_CHATWOOT_ACCOUNT_ID: ${{ secrets.STAGING_CHATWOOT_ACCOUNT_ID }}
       SMOKE_CHATWOOT_INBOX_ID: ${{ secrets.STAGING_CHATWOOT_INBOX_ID }}
@@ -42,6 +47,9 @@ jobs:
       TEST_WHATSAPP_NUMBER: ${{ secrets.STAGING_TEST_WHATSAPP_NUMBER }}
       EVOLUTION_TEST_MESSAGE: ${{ secrets.STAGING_EVOLUTION_TEST_MESSAGE }}
       SMOKE_TIMEOUT_MS: '15000'
+      SMOKE_CHATWOOT_MESSAGE_ID: ${{ secrets.STAGING_CHATWOOT_MESSAGE_ID }}
+      SMOKE_RESPONSE_TIMEOUT_MS: '30000'
+      SMOKE_RESPONSE_POLL_MS: '1000'
 
     steps:
       - name: Checkout code
@@ -79,6 +87,14 @@ jobs:
               missing+=("$name")
             fi
           done
+
+          if [ -n "${SMOKE_CHATWOOT_MESSAGE_ID}" ]; then
+            for name in CHATWOOT_API_URL CHATWOOT_API_TOKEN; do
+              if [ -z "${!name}" ]; then
+                missing+=("$name")
+              fi
+            done
+          fi
 
           if [ "${SEND_EVOLUTION_TEST_MESSAGE}" = "true" ] && [ -z "${TEST_WHATSAPP_NUMBER}" ]; then
             missing+=("TEST_WHATSAPP_NUMBER")

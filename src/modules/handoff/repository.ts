@@ -4,6 +4,7 @@
 import { query } from '../../shared/db/index.js';
 import { config } from '../../config/index.js';
 import { logger } from '../logging/index.js';
+import { maskSensitiveData } from '../../shared/data-masking';
 
 /**
  * Handoff record types
@@ -25,6 +26,7 @@ export interface HandoffRecord {
   completedAt: Date | null;
   resolvedBy: string | null;
   resolutionNotes: string | null;
+  idempotencyKey?: string | null;
 }
 
 export interface CreateHandoffInput {
@@ -38,6 +40,7 @@ export interface CreateHandoffInput {
   whatWasAnswered?: string;
   whatIsMissing?: string;
   riskLevel?: 'low' | 'medium' | 'high' | 'critical';
+  idempotencyKey?: string;
 }
 
 export interface HandoffRow {
@@ -57,6 +60,7 @@ export interface HandoffRow {
   completed_at: Date | null;
   resolved_by: string | null;
   resolution_notes: string | null;
+  idempotency_key?: string | null;
 }
 
 /**
@@ -80,7 +84,20 @@ function mapRowToHandoff(row: HandoffRow): HandoffRecord {
     completedAt: row.completed_at,
     resolvedBy: row.resolved_by,
     resolutionNotes: row.resolution_notes,
+    idempotencyKey: row.idempotency_key,
   };
+}
+
+function persistedText(value: string | undefined, maxChars = 2_000): string | null {
+  if (!value) return null;
+  return maskSensitiveData(value.trim()).slice(0, maxChars) || null;
+}
+
+function persistedQuestions(values: string[] | undefined): string[] {
+  return (values || [])
+    .map((value) => persistedText(value, 500))
+    .filter((value): value is string => Boolean(value))
+    .slice(0, 20);
 }
 
 /**
@@ -176,6 +193,44 @@ export class HandoffRepository {
    * Create a new handoff record
    */
   async create(input: CreateHandoffInput): Promise<HandoffRecord> {
+    const triggerReason = persistedText(input.triggerReason, 500) || 'Atendimento requer humano';
+    const summary = persistedText(input.summary);
+    const pendingQuestions = persistedQuestions(input.pendingQuestions);
+    const whatWasAnswered = persistedText(input.whatWasAnswered);
+    const whatIsMissing = persistedText(input.whatIsMissing);
+
+    if (input.idempotencyKey) {
+      const result = await query<HandoffRow>(`
+        INSERT INTO handoffs (
+          tenant_id, conversation_id, contact_id, trigger_type, trigger_reason,
+          priority, summary, pending_questions, what_was_answered, what_is_missing,
+          risk_level, idempotency_key
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        ON CONFLICT (tenant_id, idempotency_key) DO UPDATE SET
+          trigger_reason = EXCLUDED.trigger_reason,
+          summary = EXCLUDED.summary,
+          pending_questions = EXCLUDED.pending_questions,
+          what_was_answered = EXCLUDED.what_was_answered,
+          what_is_missing = EXCLUDED.what_is_missing
+        RETURNING *
+      `, [
+        config.chatwoot.accountId,
+        input.conversationId,
+        input.contactId || null,
+        input.triggerType,
+        triggerReason,
+        input.priority || 'medium',
+        summary,
+        JSON.stringify(pendingQuestions),
+        whatWasAnswered,
+        whatIsMissing,
+        input.riskLevel || 'low',
+        input.idempotencyKey,
+      ]);
+      if (!result.rows[0]) throw new Error('Handoff was not persisted');
+      return mapRowToHandoff(result.rows[0]);
+    }
+
     const sql = `
       INSERT INTO handoffs (
         tenant_id, conversation_id, contact_id, trigger_type, trigger_reason,
@@ -189,12 +244,12 @@ export class HandoffRepository {
       input.conversationId,
       input.contactId || null,
       input.triggerType,
-      input.triggerReason,
+      triggerReason,
       input.priority || 'medium',
-      input.summary || null,
-      JSON.stringify(input.pendingQuestions || []),
-      input.whatWasAnswered || null,
-      input.whatIsMissing || null,
+      summary,
+      JSON.stringify(pendingQuestions),
+      whatWasAnswered,
+      whatIsMissing,
       input.riskLevel || 'low',
     ];
 
@@ -203,7 +258,10 @@ export class HandoffRepository {
       logger.info('Handoff created', { handoffId: result.rows[0].id, conversationId: input.conversationId });
       return mapRowToHandoff(result.rows[0]);
     } catch (error) {
-      logger.error('Error creating handoff', error as Error, { input });
+      logger.error('Error creating handoff', error as Error, {
+        conversationId: input.conversationId,
+        triggerType: input.triggerType,
+      });
       throw error;
     }
   }
@@ -229,6 +287,17 @@ export class HandoffRepository {
       logger.error('Error finding handoff by conversation', error as Error, { conversationId });
       throw error;
     }
+  }
+
+  async findPending(limit = 50): Promise<HandoffRecord[]> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit), 1), 200);
+    const result = await query<HandoffRow>(`
+      SELECT * FROM handoffs
+      WHERE tenant_id = $1 AND status = 'pending'
+      ORDER BY created_at ASC
+      LIMIT $2
+    `, [config.chatwoot.accountId, safeLimit]);
+    return result.rows.map(mapRowToHandoff);
   }
 
   /**
@@ -290,7 +359,12 @@ export class HandoffRepository {
     `;
 
     try {
-      const result = await query(sql, [config.chatwoot.accountId, conversationId, 'system', resolutionNotes]);
+      const result = await query(sql, [
+        config.chatwoot.accountId,
+        conversationId,
+        'system',
+        persistedText(resolutionNotes, 500),
+      ]);
       const updated = result.rowCount || 0;
       logger.info('Expired handoffs cancelled', { conversationId, updated });
       return updated;

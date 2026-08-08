@@ -28,18 +28,33 @@ export interface PostgresPrivacyGateway {
 interface RetentionResource {
   table: string;
   timestampColumn: string;
+  identityColumns: readonly string[];
 }
 
+const IDENTITY_BY_ID = ['id'] as const;
+
 const RETENTION_RESOURCES: Readonly<Record<string, RetentionResource>> = {
-  messages: { table: 'messages', timestampColumn: 'created_at' },
-  conversation_summaries: { table: 'conversation_summaries', timestampColumn: 'created_at' },
-  tool_executions: { table: 'tool_executions', timestampColumn: 'created_at' },
-  handoffs: { table: 'handoffs', timestampColumn: 'created_at' },
-  sector_notifications: { table: 'sector_notifications', timestampColumn: 'created_at' },
-  followup_tasks: { table: 'followup_tasks', timestampColumn: 'created_at' },
-  analytics_events: { table: 'analytics_events', timestampColumn: 'created_at' },
-  response_feedback: { table: 'response_feedback', timestampColumn: 'created_at' },
-  audit_logs: { table: 'audit_logs', timestampColumn: 'created_at' },
+  messages: { table: 'messages', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  conversation_summaries: { table: 'conversation_summaries', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  tool_executions: { table: 'tool_executions', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  handoffs: { table: 'handoffs', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  sector_notifications: { table: 'sector_notifications', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  followup_tasks: { table: 'followup_tasks', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  analytics_events: { table: 'analytics_events', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  response_feedback: { table: 'response_feedback', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  audit_logs: { table: 'audit_logs', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  inbound_receipts: { table: 'inbound_receipts', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  response_outbox: { table: 'response_outbox', timestampColumn: 'created_at', identityColumns: IDENTITY_BY_ID },
+  conversation_control_state: {
+    table: 'conversation_control_state',
+    timestampColumn: 'updated_at',
+    identityColumns: ['tenant_id', 'conversation_id'],
+  },
+  scheduling_state: {
+    table: 'conversation_scheduling_state',
+    timestampColumn: 'updated_at',
+    identityColumns: ['tenant_id', 'conversation_id'],
+  },
 };
 
 const SUBJECT_EXPORT_QUERIES: Readonly<Record<string, string>> = {
@@ -86,6 +101,44 @@ const SUBJECT_EXPORT_QUERIES: Readonly<Record<string, string>> = {
   )`,
   followups: 'SELECT * FROM followup_tasks WHERE tenant_id = $1 AND contact_id = $2',
   auditLogs: 'SELECT * FROM audit_logs WHERE tenant_id = $1 AND contact_id = $2',
+  inboundReceipts: `
+    SELECT receipt.* FROM inbound_receipts receipt
+    JOIN conversations conversation
+      ON conversation.tenant_id = receipt.tenant_id
+      AND conversation.chatwoot_conversation_id = receipt.chatwoot_conversation_id
+    JOIN contacts contact
+      ON contact.tenant_id = conversation.tenant_id
+      AND contact.chatwoot_id = conversation.chatwoot_contact_id
+    WHERE receipt.tenant_id = $1 AND contact.id = $2
+  `,
+  responseOutbox: `
+    SELECT outbox.* FROM response_outbox outbox
+    JOIN conversations conversation
+      ON conversation.tenant_id = outbox.tenant_id AND conversation.id = outbox.conversation_id
+    JOIN contacts contact
+      ON contact.tenant_id = conversation.tenant_id
+      AND contact.chatwoot_id = conversation.chatwoot_contact_id
+    WHERE outbox.tenant_id = $1 AND contact.id = $2
+  `,
+  conversationControlState: `
+    SELECT control.* FROM conversation_control_state control
+    JOIN conversations conversation
+      ON conversation.tenant_id = control.tenant_id AND conversation.id = control.conversation_id
+    JOIN contacts contact
+      ON contact.tenant_id = conversation.tenant_id
+      AND contact.chatwoot_id = conversation.chatwoot_contact_id
+    WHERE control.tenant_id = $1 AND contact.id = $2
+  `,
+  schedulingState: `
+    SELECT scheduling.* FROM conversation_scheduling_state scheduling
+    JOIN conversations conversation
+      ON conversation.tenant_id = scheduling.tenant_id
+      AND conversation.id = scheduling.conversation_id
+    JOIN contacts contact
+      ON contact.tenant_id = conversation.tenant_id
+      AND contact.chatwoot_id = conversation.chatwoot_contact_id
+    WHERE scheduling.tenant_id = $1 AND contact.id = $2
+  `,
 };
 
 const ANONYMIZATION_QUERIES: readonly string[] = [
@@ -128,6 +181,40 @@ const ANONYMIZATION_QUERIES: readonly string[] = [
    WHERE tenant_id = $1 AND contact_id = $2`,
   `UPDATE audit_logs SET contact_id = NULL, metadata = jsonb_build_object('anonymized', true)
    WHERE tenant_id = $1 AND contact_id = $2`,
+  `UPDATE inbound_receipts SET payload = jsonb_build_object(
+      'event', event_type,
+      'id', chatwoot_message_id,
+      'conversation', jsonb_build_object('id', chatwoot_conversation_id)
+    ), correlation_id = 'anonymized', last_error = NULL
+   WHERE tenant_id = $1 AND chatwoot_conversation_id IN (
+     SELECT chatwoot_conversation_id FROM conversations conversation
+     JOIN contacts contact ON contact.tenant_id = conversation.tenant_id
+       AND contact.chatwoot_id = conversation.chatwoot_contact_id
+     WHERE conversation.tenant_id = $1 AND contact.id = $2
+   )`,
+  `UPDATE response_outbox SET content = '[ANONYMIZED]', last_error = NULL
+   WHERE tenant_id = $1 AND conversation_id IN (
+     SELECT conversation.id FROM conversations conversation
+     JOIN contacts contact ON contact.tenant_id = conversation.tenant_id
+       AND contact.chatwoot_id = conversation.chatwoot_contact_id
+     WHERE conversation.tenant_id = $1 AND contact.id = $2
+   )`,
+  `UPDATE conversation_control_state SET handoff_reason = NULL, handoff_owner = NULL
+   WHERE tenant_id = $1 AND conversation_id IN (
+     SELECT conversation.id FROM conversations conversation
+     JOIN contacts contact ON contact.tenant_id = conversation.tenant_id
+       AND contact.chatwoot_id = conversation.chatwoot_contact_id
+     WHERE conversation.tenant_id = $1 AND contact.id = $2
+   )`,
+  `UPDATE conversation_scheduling_state
+   SET state = state - 'appointmentId' - 'slotId' - 'serviceId' - 'petName' - 'contactId' - 'lastIntent',
+       updated_at = NOW()
+   WHERE tenant_id = $1 AND conversation_id IN (
+     SELECT conversation.id FROM conversations conversation
+     JOIN contacts contact ON contact.tenant_id = conversation.tenant_id
+       AND contact.chatwoot_id = conversation.chatwoot_contact_id
+     WHERE conversation.tenant_id = $1 AND contact.id = $2
+   )`,
   `UPDATE customer_memories SET value = '{}'::JSONB, is_active = false
    WHERE tenant_id = $1 AND contact_id = $2`,
   `UPDATE pets SET name = $3, chatwoot_id = NULL, breed = NULL, birth_date = NULL,
@@ -160,9 +247,21 @@ const ERASURE_QUERIES: readonly string[] = [
   `DELETE FROM sector_notifications WHERE tenant_id = $1 AND contact_id IN (
     $2::TEXT, (SELECT chatwoot_id::TEXT FROM contacts WHERE tenant_id = $1 AND id = $2)
   )`,
+  `DELETE FROM inbound_receipts WHERE tenant_id = $1 AND chatwoot_conversation_id IN (
+    SELECT conversation.chatwoot_conversation_id FROM conversations conversation
+    JOIN contacts contact ON contact.tenant_id = conversation.tenant_id
+      AND contact.chatwoot_id = conversation.chatwoot_contact_id
+    WHERE conversation.tenant_id = $1 AND contact.id = $2
+  )`,
   'DELETE FROM tool_executions WHERE tenant_id = $1 AND contact_id = $2',
   `UPDATE audit_logs SET contact_id = NULL, metadata = jsonb_build_object('erased', true)
    WHERE tenant_id = $1 AND contact_id = $2`,
+  `DELETE FROM conversation_scheduling_state WHERE tenant_id = $1 AND conversation_id IN (
+    SELECT conversation.id FROM conversations conversation
+    JOIN contacts contact ON contact.tenant_id = conversation.tenant_id
+      AND contact.chatwoot_id = conversation.chatwoot_contact_id
+    WHERE conversation.tenant_id = $1 AND contact.id = $2
+  )`,
   `DELETE FROM conversations WHERE tenant_id = $1 AND chatwoot_contact_id = (
      SELECT chatwoot_id FROM contacts WHERE tenant_id = $1 AND id = $2
    )`,
@@ -209,11 +308,14 @@ export class PostgresPrivacyStoreAdapter implements PrivacyStoreAdapter {
 
   async purgeRetention(context: RetentionStoreContext): Promise<StoreMutationResult> {
     const descriptor = retentionResource(context.resource);
+    const identityColumns = descriptor.identityColumns.join(', ');
+    const identityPredicate = descriptor.identityColumns.length === 1
+      ? `${identityColumns} IN (SELECT ${identityColumns}`
+      : `(${identityColumns}) IN (SELECT ${identityColumns}`;
     return this.gateway.withTransaction(async (client) => {
       const result = await client.query(`
         DELETE FROM ${descriptor.table}
-        WHERE id IN (
-          SELECT id FROM ${descriptor.table}
+        WHERE ${identityPredicate} FROM ${descriptor.table}
           WHERE tenant_id = $1 AND ${descriptor.timestampColumn} < $2
           ORDER BY ${descriptor.timestampColumn} ASC
           LIMIT $3

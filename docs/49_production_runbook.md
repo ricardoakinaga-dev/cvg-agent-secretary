@@ -40,6 +40,9 @@ Obrigatorias:
 | `CHATWOOT_API_TOKEN` | token API Chatwoot |
 | `CHATWOOT_ACCOUNT_ID` | conta Chatwoot |
 | `CHATWOOT_WEBHOOK_SECRET` | assinatura HMAC do webhook |
+| `CHATWOOT_CONFIRM_INBOUND_MESSAGES=true` | confirma o ID no Chatwoot antes do worker executar o turno |
+| `CHATWOOT_ALLOW_CONTENT_RECONCILIATION_FALLBACK=false` | exige marcador de idempotencia, sem identidade por conteudo |
+| `CHATWOOT_ALLOW_CONTENT_TAKEOVER_FALLBACK=false` | exige identidade do bot por ID/marcador, sem takeover por conteudo igual |
 | `API_ADMIN_TOKEN` | autenticacao dos endpoints `/api` |
 
 Opcionais:
@@ -68,6 +71,7 @@ npm run test:coverage
 npm run build
 npm audit --omit=dev
 docker build -t cvg-secretary-agent:release-check .
+bash scripts/run-reliability-gate.sh
 ```
 
 Criterio minimo:
@@ -114,12 +118,12 @@ curl -fsS http://localhost:3000/health
 curl -fsS http://localhost:3000/ready
 ```
 
-`/health` deve reportar:
-
-- `redis: connected`
-- `postgres: connected`
-- `chatwoot: connected`
-- `openai: connected`
+`/health` e liveness e deve retornar `status=healthy`, versao e timestamp sem
+expor detalhes de dependencias. `/ready` e o endpoint de capacidade minima e
+deve retornar `{"ready":true}` somente quando Redis, PostgreSQL e o worker da
+fila estiverem operacionais. Chatwoot, IA e Qdrant continuam sendo observados
+por metricas, logs e smoke tests; nao devem ser chamados a cada probe de
+liveness/readiness.
 
 `/ready` deve retornar:
 
@@ -145,6 +149,14 @@ Seguranca:
 
 - configurar o mesmo valor de `CHATWOOT_WEBHOOK_SECRET` no Chatwoot e no agent;
 - chamadas com assinatura invalida devem retornar `401`.
+- manter `CHATWOOT_CONFIRM_INBOUND_MESSAGES=true` no ambiente alvo para que o
+  worker confirme o `chatwootMessageId` e que a mensagem seja publica e
+  recebida antes de processar IA ou tools;
+- usar o marcador `cvg_idempotency_key` para reconciliar respostas; igualdade
+  de texto nao e identidade de entrega.
+- manter `CHATWOOT_ALLOW_CONTENT_TAKEOVER_FALLBACK=false` no ambiente alvo;
+  mensagem outgoing de humano com o mesmo texto do bot nao pode ser
+  classificada como bot apenas por igualdade de conteudo.
 
 ## Validacao Pos-Deploy
 
@@ -202,7 +214,11 @@ Publicacao direta de documento nao aprovado deve falhar.
 
 ### 4. Conversa real
 
-Enviar mensagem pelo WhatsApp em ambiente de staging e verificar:
+No staging, preferir o smoke com `SMOKE_CHATWOOT_MESSAGE_ID`,
+`CHATWOOT_API_URL` e `CHATWOOT_API_TOKEN`. Ele verifica a mensagem inbound no
+Chatwoot antes de postar o webhook assinado e aguarda a resposta com o
+marcador duravel. Para o caminho completo, enviar mensagem pelo WhatsApp e
+verificar:
 
 1. mensagem chega no Chatwoot;
 2. webhook chega no agent;
@@ -210,6 +226,9 @@ Enviar mensagem pelo WhatsApp em ambiente de staging e verificar:
 4. agent chama IA;
 5. resposta aparece no Chatwoot;
 6. EvolutionAPI entrega no WhatsApp.
+
+O smoke sem `SMOKE_CHATWOOT_MESSAGE_ID` valida somente liveness, readiness e
+aceite `202` do webhook; ele nao e evidencia de atendimento completo.
 
 ## Rollback
 
@@ -221,12 +240,17 @@ Enviar mensagem pelo WhatsApp em ambiente de staging e verificar:
 docker images | grep cvg-secretary-agent
 ```
 
-2. Subir imagem anterior:
+2. Drenar a entrada no proxy e apontar o servico para a imagem anterior
+   imutavel aprovada, preservando PostgreSQL, Redis, pending, delayed, inflight
+   e DLQ. O Compose versionado neste repositorio usa `build`; em producao, a
+   operacao deve aplicar o overlay/orquestrador que fixa a imagem anterior
+   antes de subir a replica:
 
 ```bash
-docker compose down
-docker tag cvg-secretary-agent:<previous> cvg-secretary-agent:rollback
-docker compose up -d
+# Exemplo somente depois de o servico estar apontando para a imagem anterior.
+# Nao executar `docker compose down` nem remover os volumes dos stores.
+docker compose stop agent
+docker compose up -d agent
 ```
 
 3. Validar:
@@ -280,7 +304,7 @@ Acao:
 
 Sintomas:
 
-- `/health` com `openai: error`;
+- aumento de erros de provider, `fallback_triggered` ou `ai_provider_error_ratio`;
 - aumento de `fallback_triggered`;
 - respostas de fallback.
 
@@ -295,16 +319,18 @@ Acao:
 
 Sintomas:
 
-- `/ready` false;
 - respostas nao aparecem no Chatwoot;
-- erro em `chatwootClient.sendMessage`.
+- crescimento de `response_outbox_unknown_total` ou `response_outbox` pendente;
+- erro em `chatwootClient.sendMessage` ou falha no smoke real.
 
 Acao:
 
 1. verificar `CHATWOOT_API_URL`, token e account id;
 2. testar API do Chatwoot externamente;
 3. pausar campanha/entrada se houver fila acumulando;
-4. reprocessar manualmente conversas criticas pelo Chatwoot.
+4. reconciliar respostas `unknown` pelo endpoint autenticado antes de qualquer
+   novo envio;
+5. reprocessar manualmente somente jobs idempotentes e documentar o motivo.
 
 ### Agenda confirmando incorretamente
 
@@ -378,6 +404,18 @@ Eventos importantes:
 - `handoff_triggered`
 - `knowledge_published`
 - `knowledge_rejected`
+
+Para operacao de fila e entrega, consultar tambem:
+
+```text
+GET /api/webhooks/dead-letter
+GET /api/responses/reconciliation
+GET /api/tools/reconciliation
+GET /api/conversations/:id/handoff
+```
+
+Essas rotas exigem identidade assinada, permissao RBAC e justificativa nas
+acoes mutaveis. Nao apagar a DLQ nem repetir um POST Chatwoot manualmente.
 
 ## Criterio de Producao Real
 

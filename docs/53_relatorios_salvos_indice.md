@@ -43,6 +43,10 @@ Registrar os arquivos de relatorio salvos na pasta `docs/`, conforme solicitado.
 | `docs/73_post_remediation_reaudit.md` | Reauditoria tecnica e notas apos a remediacao. |
 | `docs/74_final_remediation_execution_report.md` | Consolidacao final da execucao, gates reproduzidos e pendencias externas. |
 | `docs/75_contact_intake_qdrant_handoff_progress.md` | Implementacao do funil de identificacao, coleta, RAG Qdrant e handoff enriquecido. |
+| `docs/76_current_production_readiness_audit.md` | Auditoria baseline de prontidao para atendimento em producao, com veredito NO-GO e bloqueadores remanescentes. |
+| `docs/77_executive_production_readiness_plan.md` | Plano executivo para fechar os bloqueadores e preparar a liberacao controlada. |
+| `docs/78_production_readiness_roadmap.md` | Roadmap de gates, dependencias, evidencias e rollout ate o go/no-go. |
+| `docs/79_production_readiness_backlog.md` | Backlog rastreavel de tarefas, owners, prioridades e criterios de aceite. |
 
 ## Observacao
 
@@ -52,4 +56,4 @@ Os arquivos estão no repositório em:
 docs/
 ```
 
-*Registro atualizado em 2026-08-02.*
+*Registro atualizado em 2026-08-08.*

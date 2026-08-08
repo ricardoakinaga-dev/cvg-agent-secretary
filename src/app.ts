@@ -17,14 +17,37 @@ import { chatwootWebhookWorker } from './modules/webhook/worker';
 import { config } from './config';
 import { createPrivacyRuntime } from './modules/privacy/runtime';
 import { observabilityRouter } from './modules/observability';
+import { webhookAdminRouter } from './modules/webhook/adminRoutes';
+import { handoffAdminRouter } from './modules/handoff/adminRoutes';
+import { agentToolsAdminRouter } from './modules/agent-tools/adminRoutes';
+import { responseAdminRouter } from './modules/runtime/responseAdminRoutes';
 
 const app = express();
 app.set('trust proxy', config.trustProxyHops);
 const READINESS_CACHE_TTL_MS = 5_000;
 const READINESS_TIMEOUT_MS = 1_000;
+const MAX_CHATWOOT_DELIVERY_ID_LENGTH = 64;
 
 let readinessCache: { ready: boolean; expiresAt: number } | null = null;
 let readinessCheckInFlight: Promise<boolean> | null = null;
+
+function getChatwootDeliveryId(req: Request): string {
+  const deliveryHeader = req.header('x-chatwoot-delivery')?.trim();
+  if (
+    deliveryHeader
+    && deliveryHeader.length <= MAX_CHATWOOT_DELIVERY_ID_LENGTH
+    && /^[A-Za-z0-9._:-]+$/.test(deliveryHeader)
+  ) {
+    return deliveryHeader;
+  }
+
+  const timestamp = req.header('x-chatwoot-timestamp') as string;
+  return createHash('sha256')
+    .update(timestamp)
+    .update('.')
+    .update(req.rawBody as Buffer)
+    .digest('hex');
+}
 
 // Reject abusive webhook traffic before allocating memory for JSON parsing.
 app.use('/webhooks', webhookLimiter);
@@ -74,6 +97,10 @@ app.get('/ready', async (req: Request, res: Response) => {
 
 app.use('/api/knowledge', authenticateApi, knowledgeAdminRouter);
 app.use('/api/scheduling', authenticateApi, schedulingAdminRouter);
+app.use('/api/webhooks', authenticateApi, webhookAdminRouter);
+app.use('/api/conversations', authenticateApi, handoffAdminRouter);
+app.use('/api/tools', authenticateApi, agentToolsAdminRouter);
+app.use('/api/responses', authenticateApi, responseAdminRouter);
 if (config.privacy.enabled) {
   let privacyRuntime: ReturnType<typeof createPrivacyRuntime> | undefined;
   app.use('/api/privacy', authenticateApi, (req, res, next) => {
@@ -274,12 +301,7 @@ app.post(
   });
 
   try {
-    const timestamp = req.header('x-chatwoot-timestamp') as string;
-    const deliveryId = createHash('sha256')
-      .update(timestamp)
-      .update('.')
-      .update(req.rawBody as Buffer)
-      .digest('hex');
+    const deliveryId = getChatwootDeliveryId(req);
     const job = await chatwootWebhookWorker.enqueue(
       req.body as ChatwootWebhookPayload,
       correlationId,
@@ -330,6 +352,11 @@ async function runReadinessChecks(): Promise<boolean> {
     const dependencyResult = Promise.all([
       redisClient.ping(),
       checkDatabaseConnection(),
+      Promise.resolve(
+        typeof chatwootWebhookWorker.isRunning === 'function'
+          ? chatwootWebhookWorker.isRunning()
+          : true
+      ),
     ]).then((results) => results.every(Boolean));
 
     return await Promise.race([dependencyResult, timeoutResult]);

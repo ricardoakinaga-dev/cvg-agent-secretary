@@ -131,10 +131,18 @@ const ChatwootAttachmentSchema = z.object({
 const ChatwootMessageSchema = z.object({
   id: z.number().int().positive(),
   content: z.string().max(CHATWOOT_MAX_CONTENT_LENGTH).optional(),
+  content_attributes: z.object({
+    cvg_idempotency_key: z.string().max(200).optional(),
+  }).strip().optional(),
+  created_at: z.union([z.number().finite(), z.string().max(80)]).optional(),
   message_type: z.union([z.enum(['incoming', 'outgoing']), z.literal(0), z.literal(1)]),
   private: z.boolean().optional(),
   sender: ChatwootSenderSchema,
   attachments: z.array(ChatwootAttachmentSchema).max(CHATWOOT_MAX_ATTACHMENTS).optional(),
+}).strip();
+
+const ChatwootContentAttributesSchema = z.object({
+  cvg_idempotency_key: z.string().max(200).optional(),
 }).strip();
 
 export const ChatwootWebhookSchema = z.object({
@@ -158,7 +166,9 @@ export const ChatwootWebhookSchema = z.object({
   }).strip(),
   message: ChatwootMessageSchema.optional(),
   id: z.number().int().positive().optional(),
+  created_at: z.union([z.number().finite(), z.string().max(80)]).optional(),
   content: z.string().max(CHATWOOT_MAX_CONTENT_LENGTH).optional(),
+  content_attributes: ChatwootContentAttributesSchema.optional(),
   message_type: z.union([z.enum(['incoming', 'outgoing']), z.literal(0), z.literal(1)]).optional(),
   private: z.boolean().optional(),
   sender: ChatwootTopLevelSenderSchema.optional(),

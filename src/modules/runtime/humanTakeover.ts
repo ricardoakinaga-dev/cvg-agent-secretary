@@ -10,6 +10,10 @@ import {
   updateConversationState,
 } from '../conversations/contextLoader';
 import { logger } from '../logging';
+import { responseOutboxRepository } from './responseOutboxRepository';
+import { conversationRepository } from '../conversations/repository';
+import { handoffRepository } from '../handoff/repository';
+import { config } from '../../config';
 
 type RuntimeLogger = ReturnType<typeof logger.child>;
 
@@ -41,8 +45,16 @@ export async function pauseConversationForHumanTakeover(
   reason: string
 ): Promise<void> {
   const metadata = extractConversationMetadata(payload);
+  const persistedConversation = await conversationRepository.findByChatwootConversationId(
+    metadata.chatwootConversationId
+  ) || await conversationRepository.upsertConversation({
+    chatwootConversationId: metadata.chatwootConversationId,
+    chatwootContactId: metadata.chatwootContactId,
+    contactName: metadata.contactName,
+    status: metadata.status as 'open' | 'pending' | 'resolved' | 'closed',
+  });
   const context = await loadConversationContext(
-    metadata.conversationId,
+    persistedConversation.id,
     metadata.chatwootConversationId,
     metadata.contactId,
     metadata.chatwootContactId,
@@ -51,6 +63,16 @@ export async function pauseConversationForHumanTakeover(
     metadata.accountId
   );
 
+  const webhookMessage = getWebhookMessage(payload);
+  await handoffRepository.create({
+    conversationId: persistedConversation.id,
+    triggerType: 'human_operator_message',
+    triggerReason: reason,
+    summary: 'Mensagem enviada por operador humano; automacao pausada.',
+    pendingQuestions: [],
+    riskLevel: 'low',
+    idempotencyKey: `cvg:human-takeover:${persistedConversation.id}:${webhookMessage?.id || metadata.chatwootConversationId}`,
+  });
   await updateConversationState(context, 'handoff', { reason });
 
   log.info('Automation paused for human takeover', {
@@ -78,13 +100,46 @@ export async function handleOutgoingMessage(
     return true;
   }
 
-  const isKnownBotMessage = await redisClient.isBotOutgoingMessageId(webhookMessage.id);
-  const isPendingBotMessage = await redisClient.consumeBotOutgoingContent(
-    payload.conversation.id,
-    webhookMessage.content || ''
-  );
+  const durableBotMessage = await responseOutboxRepository.findByChatwootMessageId(webhookMessage.id);
+  const isKnownBotMessage = Boolean(durableBotMessage)
+    || await redisClient.isBotOutgoingMessageId(webhookMessage.id);
+  const isPendingBotMessage = config.chatwoot.allowContentTakeoverFallback
+    ? await redisClient.consumeBotOutgoingContent(
+      payload.conversation.id,
+      webhookMessage.content || ''
+    )
+    : false;
 
-  if (isKnownBotMessage || isPendingBotMessage) {
+  // If the process crashed after Chatwoot accepted an idempotent response,
+  // the outgoing webhook can carry the durable marker even though the local
+  // row has no external message ID yet. Reconcile it before classifying the
+  // event as a human takeover.
+  const responseOutbox = responseOutboxRepository as typeof responseOutboxRepository & {
+    findByIdempotencyKey?: (
+      idempotencyKey: string
+    ) => Promise<Awaited<ReturnType<typeof responseOutboxRepository.getById>>>;
+  };
+  const outgoingMarker = webhookMessage.content_attributes?.cvg_idempotency_key;
+  const markedBotIntent = outgoingMarker && responseOutbox.findByIdempotencyKey
+    ? await responseOutbox.findByIdempotencyKey(outgoingMarker)
+    : null;
+  if (markedBotIntent?.status === 'unknown') {
+    try {
+      await responseOutboxRepository.markReconciled(
+        markedBotIntent.id,
+        webhookMessage.id,
+        `webhook:${webhookMessage.id}`
+      );
+    } catch (error) {
+      log.warn('Bot response marker found but durable reconciliation is pending', {
+        chatwootMessageId: webhookMessage.id,
+        responseIntentId: markedBotIntent.id,
+        error,
+      });
+    }
+  }
+
+  if (isKnownBotMessage || isPendingBotMessage || Boolean(markedBotIntent)) {
     log.info('Bot outgoing message detected, skipping human takeover', {
       chatwootMessageId: webhookMessage.id,
     });

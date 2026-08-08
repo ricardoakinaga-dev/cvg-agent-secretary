@@ -389,6 +389,13 @@ export const METRICS = {
   WEBHOOK_PROCESSING_ERRORS_TOTAL: 'webhook_processing_errors_total',
   WEBHOOK_PROCESSING_LATENCY_MS: 'webhook_processing_latency_ms',
   WEBHOOK_RECOVERED_TOTAL: 'webhook_recovered_total',
+  INBOUND_RECEIPTS_TOTAL: 'inbound_receipts_total',
+  RESPONSE_OUTBOX_TOTAL: 'response_outbox_total',
+  RESPONSE_OUTBOX_UNKNOWN_TOTAL: 'response_outbox_unknown_total',
+  RESPONSE_OUTBOX_RECONCILED_TOTAL: 'response_outbox_reconciled_total',
+  RESPONSE_OUTBOX_DUPLICATES_TOTAL: 'response_outbox_duplicates_total',
+  HANDOFF_FAILURES_TOTAL: 'handoff_failures_total',
+  CONTEXT_VERSION_CONFLICTS_TOTAL: 'context_version_conflicts_total',
 
   DEPENDENCY_UP: 'dependency_up',
   DEPENDENCY_CHECK_LATENCY_MS: 'dependency_check_latency_ms',

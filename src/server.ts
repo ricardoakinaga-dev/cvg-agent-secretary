@@ -9,6 +9,8 @@ import { assertContactPiiReady } from './modules/contacts/pii';
 import type { Server } from 'http';
 
 let handoffCleanupInterval: NodeJS.Timeout | null = null;
+let privacyCleanupInterval: NodeJS.Timeout | null = null;
+let responseReconciliationInterval: NodeJS.Timeout | null = null;
 let httpServer: Server | null = null;
 
 export interface StartServerDependencies {
@@ -17,6 +19,8 @@ export interface StartServerDependencies {
   connectRedis: () => Promise<void>;
   startWebhookWorker: () => Promise<void>;
   startHandoffCleanup: () => void;
+  startPrivacyMaintenance?: () => void;
+  startResponseReconciliation?: () => void;
   listen: (port: number) => Server;
 }
 
@@ -43,9 +47,44 @@ function startHandoffCleanup(): void {
     sweepExpiredHandoffs().catch((error) => {
       logger.error('Expired handoff cleanup failed', error as Error);
     });
+    if (config.chatwoot?.accountId) {
+      import('./modules/runtime/operationalHandoff')
+        .then(({ reconcilePendingHandoffs }) => reconcilePendingHandoffs())
+        .catch((error) => {
+          logger.error('Pending handoff reconciliation failed', error as Error);
+        });
+    }
   }, 60_000);
 
   handoffCleanupInterval.unref();
+}
+
+function startPrivacyMaintenance(): void {
+  if (!config.privacy?.enabled || !config.privacy.automaticPurgeEnabled) return;
+  const run = () => {
+    import('./modules/privacy/runtime')
+      .then(({ runAutomatedRetentionPurge }) => runAutomatedRetentionPurge())
+      .catch((error) => {
+        logger.error('Automated privacy retention purge failed', error as Error);
+      });
+  };
+  run();
+  privacyCleanupInterval = setInterval(run, 24 * 60 * 60 * 1_000);
+  privacyCleanupInterval.unref();
+}
+
+function startResponseReconciliation(): void {
+  if (!config.chatwoot?.apiToken) return;
+  const run = () => {
+    import('./modules/runtime/messageDelivery')
+      .then(({ reconcileUnknownResponseIntents }) => reconcileUnknownResponseIntents())
+      .catch((error) => {
+        logger.error('Response outbox reconciliation failed', error as Error);
+      });
+  };
+  run();
+  responseReconciliationInterval = setInterval(run, 15_000);
+  responseReconciliationInterval.unref();
 }
 
 const defaultStartServerDependencies: StartServerDependencies = {
@@ -54,6 +93,8 @@ const defaultStartServerDependencies: StartServerDependencies = {
   connectRedis: () => redisClient.connect(),
   startWebhookWorker: () => chatwootWebhookWorker.start(),
   startHandoffCleanup,
+  startPrivacyMaintenance,
+  startResponseReconciliation,
   listen: (port) => app.listen(port, () => {
     logger.info(`Server listening on port ${port}`);
     logger.info(`Health check: http://localhost:${port}/health`);
@@ -85,6 +126,8 @@ export async function startServer(
   await dependencies.connectRedis();
   await dependencies.startWebhookWorker();
   dependencies.startHandoffCleanup();
+  dependencies.startPrivacyMaintenance?.();
+  dependencies.startResponseReconciliation?.();
   httpServer = dependencies.listen(config.port);
 }
 
@@ -94,6 +137,14 @@ export async function stopServer(
   if (handoffCleanupInterval) {
     clearInterval(handoffCleanupInterval);
     handoffCleanupInterval = null;
+  }
+  if (privacyCleanupInterval) {
+    clearInterval(privacyCleanupInterval);
+    privacyCleanupInterval = null;
+  }
+  if (responseReconciliationInterval) {
+    clearInterval(responseReconciliationInterval);
+    responseReconciliationInterval = null;
   }
 
   const serverToClose = httpServer;

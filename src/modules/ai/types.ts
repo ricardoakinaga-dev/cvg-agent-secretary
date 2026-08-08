@@ -16,6 +16,7 @@ export interface GenerateInput {
 export interface AgentContext {
   conversationId?: string;
   contactId?: string;
+  turnId?: string;
   schedulingState?: unknown;
   contactName: string;
   conversationHistory: string[];

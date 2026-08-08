@@ -4,6 +4,24 @@
 
 **Decisao atual: NO-GO para producao hospitalar com dados reais.** A implementacao tecnica fechou a maior parte dos achados de codigo, mas controles dependentes de ambiente, governanca e terceiros ainda nao possuem evidencia. Staging controlado e permitido somente com dados sinteticos e secrets proprios.
 
+## Atualizacao do ciclo de 2026-08-08
+
+O ciclo local posterior implementou receipt/inbox e outbox duraveis,
+reconciliacao Chatwoot sem retry cego, handoff persistente fail-closed,
+reidratacao apos perda do Redis, estado de agendamento duravel em PostgreSQL,
+confirmacao estrita de mensagem publica e incoming, smoke de staging com
+mensagem real, scanner de PII em artefatos e regressao clinica de baixa
+confianca. Typecheck, lint, build, `npm audit`, scanner de artefatos e
+`git diff --check` e a suite local passaram
+com 959 testes aprovados e 12 ignorados em 114 arquivos aprovados e 4
+ignorados.
+
+Essas evidencias sao locais, mockadas ou descartaveis e nao fecham os riscos
+externos. O veredito permanece **NO-GO**; a homologacao Chatwoot/EvolutionAPI/
+WhatsApp, secrets/TLS/rede, DPO/DPA/retencao, observabilidade provisionada,
+revisao independente e ata de go/no-go continuam obrigatorias. Os documentos
+76-79 registram o snapshot, plano, roadmap e backlog detalhados deste ciclo.
+
 ## Riscos residuais
 
 | ID | Risco | Severidade | Tratamento necessario | Owner/aprovador | Estado |
@@ -21,7 +39,7 @@
 | R-11 | Chaves de PII ainda nao foram provisionadas/rotacionadas no secret manager alvo | Alta | gerar chaves, executar migration/backfill, comprovar zero legados e ensaiar rotacao | A designar | Aberto |
 | R-12 | Auditoria local e append-only para a role app, mas sem garantia WORM contra superuser | Alta | restringir administradores e exportar outbox/eventos para sink imutavel externo | A designar | Aberto |
 
-## Evidencias tecnicas disponiveis
+## Evidencias tecnicas historicas da remediacao anterior
 
 - JWT/RBAC, webhook, tenant/RLS, tools, guardrails e filas cobertos por testes automatizados;
 - 865 testes catalogados, sendo 853 ativos aprovados e 12 integracoes externas/condicionais ignoradas;

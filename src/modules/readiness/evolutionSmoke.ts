@@ -38,6 +38,10 @@ async function readJsonOrText(response: Response): Promise<string> {
   }
 }
 
+function safeNetworkErrorDetails(): string {
+  return 'network request failed; inspect the provider-side trace with restricted access';
+}
+
 async function fetchWithTimeout(
   fetchImpl: FetchLike,
   url: string,
@@ -97,13 +101,13 @@ export async function runEvolutionSmokeTest(
       name: 'evolution_instance_connection',
       passed: response.ok && isConnectedPayload(details),
       status: response.status,
-      details,
+      details: `HTTP ${response.status}`,
     });
-  } catch (error) {
+  } catch {
     checks.push({
       name: 'evolution_instance_connection',
       passed: false,
-      details: (error as Error).message,
+      details: safeNetworkErrorDetails(),
     });
   }
 
@@ -132,19 +136,19 @@ export async function runEvolutionSmokeTest(
           },
           timeoutMs
         );
-        const details = await readJsonOrText(response);
+        await readJsonOrText(response);
 
         checks.push({
           name: 'evolution_send_test_message',
           passed: response.ok,
           status: response.status,
-          details,
+          details: `HTTP ${response.status}`,
         });
-      } catch (error) {
+      } catch {
         checks.push({
           name: 'evolution_send_test_message',
           passed: false,
-          details: (error as Error).message,
+          details: safeNetworkErrorDetails(),
         });
       }
     }

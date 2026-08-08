@@ -13,7 +13,19 @@ Operar, atualizar e recuperar o agente sem expor dados, perder jobs ou ampliar p
 5. Criar e testar checkpoint de Postgres/Redis/Qdrant; registrar ID, horario, tenant e RPO/RTO.
 6. Executar migration em banco descartavel e depois no alvo com a identidade de migracao.
 7. Em primeira ativacao de criptografia ou rotacao de chave, manter chave antiga na key ring, executar `npm run pii:backfill` e comprovar zero contatos pendentes antes de iniciar a aplicacao.
-8. Manter release anterior e procedimento de rollback disponiveis.
+8. Confirmar `AUTONOMOUS_AGENT_ENABLED=false` e `PRODUCTION_GO_LIVE_APPROVED=false` ate a ata de go-live; flags verdadeiras exigem aprovacao registrada.
+9. Manter release anterior e procedimento de rollback disponiveis.
+
+Para verificar amostras exportadas de logs, respostas ou payloads de staging
+sem imprimir o dado encontrado, executar:
+
+```bash
+npm run security:scan-artifacts -- artifacts/log-sample.json artifacts/qdrant-export.json
+```
+
+O comando retorna falha para CPF, CNPJ, e-mail ou telefone brasileiros sem
+mascara. Ele e um controle de evidência para amostras; nao substitui a
+atestacao do backend Qdrant/logs nem a aprovacao de Security/Privacy.
 
 ## Deploy
 
@@ -23,6 +35,21 @@ Operar, atualizar e recuperar o agente sem expor dados, perder jobs ou ampliar p
 4. Liberar trafego gradualmente e observar queue age, retries, DLQ, erros, latencia, handoff e dependencias.
 5. Executar webhook assinado de smoke com conta/inbox de teste.
 6. Registrar imagem, SBOM, migration ledger, horario e aprovadores.
+
+## Reconciliacao operacional
+
+Todas as rotas abaixo exigem autenticacao por identidade assinada, permissao RBAC, justificativa e auditoria. Nenhuma rota expoe o payload completo ou permite retry cego de efeito externo.
+
+| Caso | Operacao |
+|---|---|
+| Webhook em DLQ | `GET /api/webhooks/dead-letter`; `POST /api/webhooks/dead-letter/:id/replay` ou `/cancel` |
+| Resposta Chatwoot `unknown` | `GET /api/responses/reconciliation`; `POST /api/responses/reconciliation/:id/confirm` com ID da mensagem confirmada |
+| Handoff humano | `GET /api/conversations/:id/handoff`; `POST /api/conversations/:id/handoff/resolve` com `resume`, `complete` ou `cancel` |
+| Tool mutavel pendente/erro | `GET /api/tools/reconciliation`; `POST /api/tools/reconciliation/:id` com `confirm` ou `retry` |
+
+Para resposta `unknown`, primeiro verificar o ID no Chatwoot. O endpoint de confirmacao aceita somente uma mensagem cujo ID e conteudo ou marca de idempotencia coincidam com a intencao; se a consulta nao provar o efeito, o registro permanece `unknown` para a reconciliacao automatica. Nunca executar um novo POST manualmente.
+
+Para handoff expirado, a expiracao cancela pendencias e conserva o bloqueio. A retomada automatica e proibida; o operador deve resolver explicitamente a conversa e registrar o motivo.
 
 ## Rollback de aplicacao
 
@@ -83,6 +110,8 @@ Para gerar chaves de 32 bytes, use o mecanismo criptografico do secret manager. 
 - retries/erros de webhook e provedor;
 - readiness indisponivel;
 - falha de auditoria, migration ou privacidade;
+- resposta Chatwoot em estado `unknown`;
+- falha de reconciliacao de handoff ou conflito de versao do contexto;
 - handoff/emergencia sem confirmacao operacional;
 - taxa clinica/eval abaixo do threshold;
 - expiracao proxima de certificado/secret/checkpoint.
@@ -93,6 +122,6 @@ O backend externo, thresholds finais e owners dos alertas devem ser preenchidos 
 
 Execute `bash scripts/run-reliability-gate.sh` somente em ambiente descartavel. O script valida migrations concorrentes/rollback, role e RLS, carga de fila, deduplicacao, restart com leases, replay AOF, restore integral de PostgreSQL, restore logico Redis e snapshot Qdrant. Evidencias estruturadas ficam em `coverage/reliability/*.json` e o CI as publica como artifact.
 
-A medicao local de 02/08/2026 comprovou 500 jobs/12 workers sem perda ou duplicacao, 25/25 leases recuperados, RPO superior medido de 1,5 s no checkpoint Redis, restore PostgreSQL/Qdrant/Redis dentro de 2 s e rollback de migration sem escrita parcial. Esses numeros comprovam o desenho descartavel; os SLOs e o ensaio no ambiente alvo ainda exigem aprovacao operacional.
+A medicao local de 08/08/2026 comprovou 14 migrations aplicadas uma vez e ignoradas na segunda execucao, 500 jobs/12 workers sem perda ou duplicacao, 25/25 leases recuperados, RPO superior medido de 1,5 s no checkpoint Redis, restore Redis/Qdrant/PostgreSQL e shutdown gracioso. Esses numeros comprovam o desenho descartavel; os SLOs e o ensaio no ambiente alvo ainda exigem aprovacao operacional.
 
 O usuario Redis `default` deve permanecer autenticado, habilitado e restrito a `cvg:*` mais comandos minimos de replay AOF (`read/write/select/multi/exec`). Desabilita-lo faz o loader AOF rejeitar transacoes Lua e pode perder a fila no restart. O usuario nomeado da aplicacao continua sendo a identidade normal de runtime.

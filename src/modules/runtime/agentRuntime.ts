@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import { config } from '../../config';
 import { redisClient } from '../../shared/redis';
 import { logger } from '../logging';
 import { aiRouter } from '../ai/router';
@@ -29,7 +30,6 @@ import {
   getWebhookMessage,
 } from '../chatwoot/normalizer';
 import { ChatwootWebhookPayload, AgentResponse } from '../../shared/types';
-import { generateContentDedupHash, generateMessageDedupHash } from './dedup';
 import {
   buildWalkInServiceResponse,
   hasWalkInServiceEvidence,
@@ -41,7 +41,12 @@ import {
 } from './humanTakeover';
 import { resolveKnowledge } from './knowledgeResolver';
 import { sendBotMessage } from './messageDelivery';
-import { executeOperationalHandoff } from './operationalHandoff';
+import { responseOutboxRepository } from './responseOutboxRepository';
+import {
+  executeOperationalHandoff,
+  prepareOperationalHandoff,
+  reconcilePendingHandoff,
+} from './operationalHandoff';
 import { sanitizePromptHistory, sanitizePromptMemories } from './promptContext';
 import { advanceContactIntake } from './contactIntake';
 import {
@@ -58,17 +63,33 @@ export { looksLikeHumanOperatorMessage } from './humanTakeover';
  */
 export async function processWebhookEvent(
   payload: ChatwootWebhookPayload,
-  correlationId: string = randomUUID()
+  correlationId: string = randomUUID(),
+  _receiptId?: string
 ): Promise<void> {
   const startTime = Date.now();
   const claimToken = randomUUID();
   const log = logger.child({ correlationId });
-  let messageHash: string | undefined;
-  let contentHash: string | undefined;
-  let messageClaimed = false;
-  let contentClaimed = false;
   let lockResourceId: string | undefined;
   let lockAcquired = false;
+  let lockLost = false;
+  let stopLockHeartbeat: (() => Promise<void>) | null = null;
+  const deliverResponse = async (
+    chatwootConversationId: number,
+    persistedConversationId: string,
+    content: string,
+    inboundChatwootMessageId: number
+  ): Promise<void> => {
+    if (lockLost) {
+      throw new Error('Conversation lock was lost before external response delivery');
+    }
+    await sendBotMessage(
+      chatwootConversationId,
+      persistedConversationId,
+      content,
+      inboundChatwootMessageId,
+      correlationId
+    );
+  };
 
   log.info('Received webhook event', {
     event: payload.event,
@@ -103,40 +124,35 @@ export async function processWebhookEvent(
     }
 
     lockResourceId = `runtime:${normalizedMessage.conversationId}`;
-    lockAcquired = await redisClient.acquireLock(lockResourceId, claimToken);
+    const lockClient = redisClient as typeof redisClient & {
+      acquireLockWithWait?: (
+        resourceId: string,
+        ownerToken: string,
+        ttlSeconds: number,
+        maxWaitMs: number,
+        pollMs: number
+      ) => Promise<boolean>;
+      renewLock?: (resourceId: string, ownerToken: string, ttlSeconds: number) => Promise<boolean>;
+    };
+    lockAcquired = lockClient.acquireLockWithWait
+      ? await lockClient.acquireLockWithWait(
+          lockResourceId,
+          claimToken,
+          config.conversation.lockTtlSeconds,
+          config.conversation.lockWaitMs,
+          config.conversation.lockPollMs
+        )
+      : await redisClient.acquireLock(lockResourceId, claimToken);
     if (!lockAcquired) {
       throw new Error('Conversation is already being processed');
     }
-
-    messageHash = generateMessageDedupHash(
-      payload.conversation.id,
-      webhookMessage.id,
-      webhookMessage.content
+    stopLockHeartbeat = startConversationLockHeartbeat(
+      lockClient.renewLock,
+      lockResourceId,
+      claimToken,
+      config.conversation.lockTtlSeconds,
+      () => { lockLost = true; }
     );
-
-    const isNewMessage = await redisClient.claimMessageHash(messageHash, claimToken);
-    if (!isNewMessage) {
-      log.info('Duplicate message detected, skipping', { messageHash });
-      return;
-    }
-    messageClaimed = true;
-
-    contentHash = generateContentDedupHash(
-      normalizedMessage.conversationId,
-      normalizedMessage.contactId,
-      normalizedMessage.content
-    );
-
-    const isNewContent = await redisClient.claimContentHash(contentHash, claimToken);
-    if (!isNewContent) {
-      log.info('Duplicate message content detected, skipping', {
-        contentHash,
-        conversationId: normalizedMessage.conversationId,
-        contactId: normalizedMessage.contactId,
-      });
-      return;
-    }
-    contentClaimed = true;
 
     const metadata = extractConversationMetadata(payload);
     const persistedConversation = await conversationRepository.upsertConversation({
@@ -146,7 +162,8 @@ export async function processWebhookEvent(
       status: metadata.status as 'open' | 'pending' | 'resolved' | 'closed',
       lastMessageAt: normalizedMessage.timestamp,
     });
-    await conversationRepository.saveMessage({
+    const runtimeConversationId = persistedConversation.id;
+    const persistedInboundMessage = await conversationRepository.saveMessage({
       conversationId: persistedConversation.id,
       chatwootMessageId: normalizedMessage.chatwootMessageId,
       content: normalizedMessage.content,
@@ -155,6 +172,42 @@ export async function processWebhookEvent(
       senderName: normalizedMessage.senderName,
       createdAt: normalizedMessage.timestamp,
     });
+
+    if (!persistedInboundMessage) {
+      const existingResponse = await responseOutboxRepository.findByInboundMessageId(
+        normalizedMessage.chatwootMessageId
+      );
+      if (existingResponse) {
+        await deliverResponse(
+          metadata.chatwootConversationId,
+          persistedConversation.id,
+          existingResponse.content,
+          normalizedMessage.chatwootMessageId
+        );
+        const context = await loadConversationContext(
+          runtimeConversationId,
+          metadata.chatwootConversationId,
+          metadata.contactId,
+          metadata.chatwootContactId,
+          metadata.contactName,
+          metadata.inboxId,
+          metadata.accountId
+        );
+        await reconcilePendingHandoff(context, log);
+        log.info('Inbound message already had a durable response intent; reconciled it without re-running the turn', {
+          chatwootMessageId: normalizedMessage.chatwootMessageId,
+          responseIntentStatus: existingResponse.status,
+        });
+        return;
+      }
+      // A crash can happen after the inbound message is committed but before
+      // the response intent is created. Re-running the deterministic turn is
+      // safer than silently losing the response; mutating tools are fenced by
+      // their durable tool-execution idempotency keys.
+      log.warn('Inbound message was already persisted without a response intent; recovering turn execution', {
+        chatwootMessageId: normalizedMessage.chatwootMessageId,
+      });
+    }
 
     if (looksLikeHumanOperatorMessage(normalizedMessage.content)) {
       await pauseConversationForHumanTakeover(payload, log, 'operator_message_pattern');
@@ -175,7 +228,7 @@ export async function processWebhookEvent(
 
       if (inputGuardrail.action === 'handoff') {
         const context = await loadConversationContext(
-          metadata.conversationId,
+          runtimeConversationId,
           metadata.chatwootConversationId,
           metadata.contactId,
           metadata.chatwootContactId,
@@ -187,6 +240,7 @@ export async function processWebhookEvent(
           context.metadata.contactIntake = persistedConversation.contactIntake;
         }
         await resetExpiredHandoff(context);
+        await reconcilePendingHandoff(context, log);
         if (!shouldProcessConversation(context)) {
           return;
         }
@@ -212,10 +266,21 @@ export async function processWebhookEvent(
           conversationId: context.conversationId,
           contactId: context.contactId,
         });
-        await sendBotMessage(
+        const preparedHandoff = await prepareOperationalHandoff({
+          context,
+          metadata,
+          normalizedMessage,
+          agentResponse,
+          intentClassification: emergencyClassification,
+          riskLevel: emergencyClassification.riskLevel || 'high',
+          correlationId,
+          log,
+        });
+        await deliverResponse(
           context.chatwootConversationId,
           persistedConversation.id,
-          agentResponse.content
+          agentResponse.content,
+          normalizedMessage.chatwootMessageId
         );
         await analyticsService.trackEvent({
           eventType: 'response_sent',
@@ -234,15 +299,18 @@ export async function processWebhookEvent(
           agentResponse,
           intentClassification: emergencyClassification,
           riskLevel: emergencyClassification.riskLevel || 'high',
+          correlationId,
           log,
+          preparedHandoff,
         });
         return;
       }
 
-      await sendBotMessage(
+      await deliverResponse(
         metadata.chatwootConversationId,
         persistedConversation.id,
-        safeResponse
+        safeResponse,
+        normalizedMessage.chatwootMessageId
       );
 
       await analyticsService.trackEvent({
@@ -266,7 +334,7 @@ export async function processWebhookEvent(
     });
 
     const context = await loadConversationContext(
-      metadata.conversationId,
+      runtimeConversationId,
       metadata.chatwootConversationId,
       metadata.contactId,
       metadata.chatwootContactId,
@@ -278,6 +346,7 @@ export async function processWebhookEvent(
       context.metadata.contactIntake = persistedConversation.contactIntake;
     }
     await resetExpiredHandoff(context);
+    await reconcilePendingHandoff(context, log);
 
     if (!shouldProcessConversation(context)) {
       log.info('Conversation should not be processed', {
@@ -291,14 +360,16 @@ export async function processWebhookEvent(
 
     const deterministicScheduling = await handleSchedulingStateMachine(
       context.conversationId,
-      normalizedMessage.content
+      normalizedMessage.content,
+      String(normalizedMessage.chatwootMessageId)
     );
 
     if (deterministicScheduling.handled && deterministicScheduling.message) {
-      await sendBotMessage(
+      await deliverResponse(
         context.chatwootConversationId,
         persistedConversation.id,
-        deterministicScheduling.message
+        deterministicScheduling.message,
+        normalizedMessage.chatwootMessageId
       );
 
       await analyticsService.trackEvent({
@@ -326,10 +397,21 @@ export async function processWebhookEvent(
 
     if (intentClassification.requiresHandoff) {
       const agentResponse = responseForRequiredHandoff(intentClassification);
-      await sendBotMessage(
+      const preparedHandoff = await prepareOperationalHandoff({
+        context,
+        metadata,
+        normalizedMessage,
+        agentResponse,
+        intentClassification,
+        riskLevel: intentClassification.riskLevel,
+        correlationId,
+        log,
+      });
+      await deliverResponse(
         context.chatwootConversationId,
         persistedConversation.id,
-        agentResponse.content
+        agentResponse.content,
+        normalizedMessage.chatwootMessageId
       );
 
       await analyticsService.trackEvent({
@@ -350,7 +432,9 @@ export async function processWebhookEvent(
         agentResponse,
         intentClassification,
         riskLevel: intentClassification.riskLevel,
+        correlationId,
         log,
+        preparedHandoff,
       });
 
       log.info('Webhook processing completed', {
@@ -381,10 +465,11 @@ export async function processWebhookEvent(
     await saveConversationContext(context);
 
     if (intakeDecision.status === 'needs_input' && intakeDecision.response) {
-      await sendBotMessage(
+      await deliverResponse(
         context.chatwootConversationId,
         persistedConversation.id,
-        intakeDecision.response
+        intakeDecision.response,
+        normalizedMessage.chatwootMessageId
       );
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -416,10 +501,21 @@ export async function processWebhookEvent(
           summary: 'O contato não conseguiu concluir a identificação e a coleta inicial.',
         },
       };
-      await sendBotMessage(
+      const preparedHandoff = await prepareOperationalHandoff({
+        context,
+        metadata,
+        normalizedMessage,
+        agentResponse,
+        intentClassification: intakeClassification,
+        riskLevel: 'low',
+        correlationId,
+        log,
+      });
+      await deliverResponse(
         context.chatwootConversationId,
         persistedConversation.id,
-        agentResponse.content
+        agentResponse.content,
+        normalizedMessage.chatwootMessageId
       );
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -439,7 +535,9 @@ export async function processWebhookEvent(
         agentResponse,
         intentClassification: intakeClassification,
         riskLevel: 'low',
+        correlationId,
         log,
+        preparedHandoff,
       });
       return;
     }
@@ -471,7 +569,12 @@ export async function processWebhookEvent(
 
     if (hasWalkInServiceEvidence(normalizedMessage.content, knowledgeResults)) {
       const content = buildWalkInServiceResponse(normalizedMessage.content, knowledgeResults);
-      await sendBotMessage(context.chatwootConversationId, persistedConversation.id, content);
+      await deliverResponse(
+        context.chatwootConversationId,
+        persistedConversation.id,
+        content,
+        normalizedMessage.chatwootMessageId
+      );
 
       await analyticsService.trackEvent({
         eventType: 'response_sent',
@@ -500,6 +603,7 @@ export async function processWebhookEvent(
     const agentContext = {
       conversationId: context.conversationId,
       contactId: memoryContext.contactId ?? context.contactId,
+      turnId: String(normalizedMessage.chatwootMessageId),
       schedulingState,
       contactName: metadata.contactName,
       conversationHistory,
@@ -606,11 +710,25 @@ export async function processWebhookEvent(
       confidence: agentResponse.confidence,
     });
 
+    const preparedHandoff = agentResponse.action?.type === 'handoff'
+      ? await prepareOperationalHandoff({
+          context,
+          metadata,
+          normalizedMessage,
+          agentResponse,
+          intentClassification,
+          riskLevel: intentClassification.riskLevel,
+          correlationId,
+          log,
+        })
+      : undefined;
+
     try {
-      await sendBotMessage(
+      await deliverResponse(
         context.chatwootConversationId,
         persistedConversation.id,
-        agentResponse.content
+        agentResponse.content,
+        normalizedMessage.chatwootMessageId
       );
 
       log.info('Response sent to Chatwoot');
@@ -634,7 +752,9 @@ export async function processWebhookEvent(
           agentResponse,
           intentClassification,
           riskLevel: intentClassification.riskLevel,
+          correlationId,
           log,
+          preparedHandoff,
         });
       }
     } catch (error) {
@@ -662,24 +782,12 @@ export async function processWebhookEvent(
       conversationId: context.conversationId,
     });
   } catch (error) {
-    const releases: Promise<unknown>[] = [];
-    if (contentClaimed && contentHash) {
-      releases.push(redisClient.releaseContentHash(contentHash, claimToken));
-    }
-    if (messageClaimed && messageHash) {
-      releases.push(redisClient.releaseMessageHash(messageHash, claimToken));
-    }
-
-    const releaseResults = await Promise.allSettled(releases);
-    for (const result of releaseResults) {
-      if (result.status === 'rejected') {
-        log.error('Failed to release runtime dedup claim', result.reason as Error);
-      }
-    }
-
     log.error('Error processing webhook', error as Error);
     throw error;
   } finally {
+    if (stopLockHeartbeat) {
+      await stopLockHeartbeat();
+    }
     if (lockAcquired && lockResourceId) {
       try {
         await redisClient.releaseLock(lockResourceId, claimToken);
@@ -690,6 +798,31 @@ export async function processWebhookEvent(
       }
     }
   }
+}
+
+function startConversationLockHeartbeat(
+  renewLock: ((resourceId: string, ownerToken: string, ttlSeconds: number) => Promise<boolean>) | undefined,
+  resourceId: string,
+  ownerToken: string,
+  ttlSeconds: number,
+  onLost: () => void
+): () => Promise<void> {
+  if (!renewLock) return async () => undefined;
+  const activeRenewals = new Set<Promise<void>>();
+  const interval = setInterval(() => {
+    const renewal = renewLock(resourceId, ownerToken, ttlSeconds)
+      .then((owned) => {
+        if (!owned) onLost();
+      })
+      .catch(() => onLost());
+    activeRenewals.add(renewal);
+    void renewal.finally(() => activeRenewals.delete(renewal));
+  }, Math.max(1_000, Math.floor(ttlSeconds * 1_000 / 3)));
+  interval.unref();
+  return async () => {
+    clearInterval(interval);
+    await Promise.allSettled([...activeRenewals]);
+  };
 }
 
 /**
@@ -712,7 +845,7 @@ export async function processConversationCreated(payload: ChatwootWebhookPayload
   });
 
   const metadata = extractConversationMetadata(payload);
-  await conversationRepository.upsertConversation({
+  const persistedConversation = await conversationRepository.upsertConversation({
     chatwootConversationId: metadata.chatwootConversationId,
     chatwootContactId: metadata.chatwootContactId,
     contactName: metadata.contactName,
@@ -725,7 +858,7 @@ export async function processConversationCreated(payload: ChatwootWebhookPayload
   });
 
   await loadConversationContext(
-    metadata.conversationId,
+    persistedConversation.id,
     metadata.chatwootConversationId,
     metadata.contactId,
     metadata.chatwootContactId,

@@ -81,6 +81,13 @@ groups:
         annotations:
           summary: Webhook processing p95 is above 5 seconds
           runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgResponseDeliveryUnknown
+        expr: cvg:response_outbox_unknown_increase:10m > 0
+        for: 0m
+        labels: { severity: critical, owner: backend }
+        annotations:
+          summary: A Chatwoot response has unknown external delivery state
+          runbook: docs/71_security_operations_and_recovery_runbook.md
 
   - name: cvg-agent-secretary-service-quality
     rules:
@@ -112,6 +119,20 @@ groups:
         annotations:
           summary: A privacy operation failed and requires reconciliation
           runbook: docs/69_data_subject_rights_runbook.md
+      - alert: CvgHandoffReconciliationFailure
+        expr: cvg:handoff_failure_increase:10m > 0
+        for: 0m
+        labels: { severity: critical, owner: operations }
+        annotations:
+          summary: A human handoff requires external reconciliation
+          runbook: docs/71_security_operations_and_recovery_runbook.md
+      - alert: CvgContextVersionConflict
+        expr: cvg:context_version_conflict_increase:10m > 0
+        for: 5m
+        labels: { severity: warning, owner: backend }
+        annotations:
+          summary: A Redis conversation snapshot was stale against PostgreSQL
+          runbook: docs/71_security_operations_and_recovery_runbook.md
 
   - name: cvg-agent-secretary-error-budget
     rules:

@@ -94,6 +94,27 @@
         { "expr": "cvg:slo_webhook_error_budget_burn:rate6h", "legendFormat": "6h", "refId": "B" }
       ],
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 23 }
+    },
+    {
+      "id": 12,
+      "title": "Entregas externas desconhecidas",
+      "type": "timeseries",
+      "targets": [{ "expr": "cvg:response_outbox_unknown_increase:10m", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 31 }
+    },
+    {
+      "id": 13,
+      "title": "Falhas de handoff",
+      "type": "timeseries",
+      "targets": [{ "expr": "cvg:handoff_failure_increase:10m", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 31 }
+    },
+    {
+      "id": 14,
+      "title": "Conflitos de versão do contexto",
+      "type": "timeseries",
+      "targets": [{ "expr": "cvg:context_version_conflict_increase:10m", "refId": "A" }],
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 31 }
     }
   ],
   "schemaVersion": 39,

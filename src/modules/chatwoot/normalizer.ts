@@ -102,6 +102,8 @@ export function getWebhookMessage(payload: ChatwootWebhookPayload): ChatwootMess
   return {
     id: payload.id,
     content: payload.content || '',
+    content_attributes: payload.content_attributes,
+    created_at: payload.created_at,
     message_type: payload.message_type,
     sender: payload.sender
       ? { ...payload.sender, type: payload.sender.type || inferredSenderType }
@@ -113,6 +115,18 @@ export function getWebhookMessage(payload: ChatwootWebhookPayload): ChatwootMess
 
 function getConversationId(payload: ChatwootWebhookPayload): string {
   return payload.conversation.uuid || `chatwoot-${payload.conversation.id}`;
+}
+
+function parseChatwootTimestamp(value: number | string | undefined): Date {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const parsed = new Date(value < 10_000_000_000 ? value * 1_000 : value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    if (!Number.isNaN(parsed.getTime())) return parsed;
+  }
+  return new Date();
 }
 
 function getContact(payload: ChatwootWebhookPayload): ChatwootContact {
@@ -168,7 +182,7 @@ export function normalizeMessage(
     messageType: 'incoming',
     senderType: 'user',
     senderName: message.sender.name || contact.name,
-    timestamp: new Date(),
+    timestamp: parseChatwootTimestamp(message.created_at ?? payload.created_at),
     attachments: normalizeAttachments(message),
   };
 

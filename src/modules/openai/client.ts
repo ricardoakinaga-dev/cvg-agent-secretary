@@ -16,6 +16,7 @@ import {
 export interface AgentContext {
   conversationId?: string;
   contactId?: string;
+  turnId?: string;
   schedulingState?: unknown;
   contactName: string;
   conversationHistory: string[];
@@ -251,6 +252,7 @@ export class OpenAIClient {
           contactId: context.contactId,
           contactName: context.contactName,
           userMessage,
+          turnId: context.turnId,
         }
       );
 

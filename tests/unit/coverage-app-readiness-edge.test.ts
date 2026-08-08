@@ -56,9 +56,21 @@ describe('staging readiness failure and timeout behavior', () => {
 
     expect(result.passed).toBe(false);
     expect(result.checks).toEqual([
-      { name: 'health', passed: false, details: 'health network error' },
-      { name: 'readiness', passed: false, details: 'readiness network error' },
-      { name: 'signed_chatwoot_webhook', passed: false, details: 'webhook network error' },
+      {
+        name: 'health',
+        passed: false,
+        details: 'network request failed; inspect the provider-side trace with restricted access',
+      },
+      {
+        name: 'readiness',
+        passed: false,
+        details: 'network request failed; inspect the provider-side trace with restricted access',
+      },
+      {
+        name: 'signed_chatwoot_webhook',
+        passed: false,
+        details: 'network request failed; inspect the provider-side trace with restricted access',
+      },
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
@@ -73,9 +85,9 @@ describe('staging readiness failure and timeout behavior', () => {
 
     expect(result.passed).toBe(false);
     expect(result.checks).toEqual([
-      { name: 'health', passed: false, status: 200, details: undefined },
-      { name: 'readiness', passed: false, status: 200, details: undefined },
-      { name: 'signed_chatwoot_webhook', passed: false, status: 200, details: undefined },
+      { name: 'health', passed: false, status: 200, details: 'HTTP 200; status=unknown' },
+      { name: 'readiness', passed: false, status: 200, details: 'HTTP 200; ready=false' },
+      { name: 'signed_chatwoot_webhook', passed: false, status: 200, details: 'HTTP 200; accepted=false' },
     ]);
   });
 
@@ -93,7 +105,7 @@ describe('staging readiness failure and timeout behavior', () => {
     expect(Date.now() - started).toBeLessThan(250);
     expect(result.passed).toBe(false);
     expect(result.checks).toHaveLength(3);
-    expect(result.checks.every((check) => check.details === 'aborted by timeout')).toBe(true);
+    expect(result.checks.every((check) => check.details === 'network request failed; inspect the provider-side trace with restricted access')).toBe(true);
   });
 
   it('uses smoke environment defaults for optional values', () => {
@@ -151,13 +163,13 @@ describe('EvolutionAPI readiness failure behavior', () => {
     });
   });
 
-  it('uses an empty detail when neither JSON nor text can be read', async () => {
+  it('uses only the HTTP status when neither JSON nor text can be read', async () => {
     const fetchMock = vi.fn().mockResolvedValue(response({
       jsonError: new Error('not json'),
       textError: new Error('no text'),
     }));
     const result = await runEvolutionSmokeTest(baseOptions, fetchMock as typeof fetch);
-    expect(result.checks[0]).toMatchObject({ passed: false, details: '' });
+    expect(result.checks[0]).toMatchObject({ passed: false, details: 'HTTP 200' });
   });
 
   it('records connection and optional message network failures', async () => {
@@ -169,7 +181,7 @@ describe('EvolutionAPI readiness failure behavior', () => {
     expect(failedConnection.checks[0]).toEqual({
       name: 'evolution_instance_connection',
       passed: false,
-      details: 'connection failed',
+      details: 'network request failed; inspect the provider-side trace with restricted access',
     });
 
     const sendFailure = vi.fn()
@@ -183,7 +195,7 @@ describe('EvolutionAPI readiness failure behavior', () => {
     expect(failedSend.checks[1]).toEqual({
       name: 'evolution_send_test_message',
       passed: false,
-      details: 'send failed',
+      details: 'network request failed; inspect the provider-side trace with restricted access',
     });
     expect(JSON.parse((sendFailure.mock.calls[1][1] as RequestInit).body as string)).toEqual({
       number: '5511999999999',

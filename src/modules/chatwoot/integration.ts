@@ -57,6 +57,8 @@ export interface HandoffSummary {
   handoffReason: string;
   pendingQuestions: string[];
   whatWasAnswered: string[];
+  /** Stable marker used to reconcile the private note after an unknown POST. */
+  idempotencyKey?: string;
 }
 
 /**
@@ -129,22 +131,73 @@ export async function executeHandoff(
 ): Promise<void> {
   try {
     // 1. Add labels
-    const allLabels = [HANDOFF_LABELS.HANDOFF, ...labels];
+    const allLabels = Array.from(new Set([HANDOFF_LABELS.HANDOFF, ...labels]));
+    const idempotentChatwoot = chatwootClient as typeof chatwootClient & {
+      ensureLabel?: (conversationId: number, label: string) => Promise<void>;
+      findMessageByIdempotencyKey?: (
+        conversationId: number,
+        idempotencyKey: string,
+        content: string,
+        createdAfter: Date,
+        options?: { private?: boolean }
+      ) => Promise<{ id: number } | null>;
+      sendMessageWithIdempotency?: (params: {
+        conversationId: number;
+        content: string;
+        private: boolean;
+        idempotencyKey: string;
+      }) => Promise<{ id: number }>;
+    };
+    const failedLabels: string[] = [];
     for (const label of allLabels) {
       try {
-        await chatwootClient.addLabel(conversationId, label);
+        if (idempotentChatwoot.ensureLabel) {
+          await idempotentChatwoot.ensureLabel(conversationId, label);
+        } else {
+          await chatwootClient.addLabel(conversationId, label);
+        }
       } catch (labelError) {
+        failedLabels.push(label);
         logger.warn('Failed to add label', { conversationId: String(conversationId), label, error: labelError });
       }
     }
 
     // 2. Create internal note with summary
     const summaryText = generateHandoffSummary(summary);
-    await chatwootClient.sendMessage({
-      conversationId,
-      content: summaryText,
-      private: true, // Internal note
-    });
+    if (
+      summary.idempotencyKey
+      && idempotentChatwoot.findMessageByIdempotencyKey
+      && idempotentChatwoot.sendMessageWithIdempotency
+    ) {
+      const existing = await idempotentChatwoot.findMessageByIdempotencyKey(
+        conversationId,
+        summary.idempotencyKey,
+        summaryText,
+        new Date(Date.now() - 24 * 60 * 60 * 1_000),
+        { private: true }
+      );
+      if (!existing) {
+        await idempotentChatwoot.sendMessageWithIdempotency({
+          conversationId,
+          content: summaryText,
+          private: true,
+          idempotencyKey: summary.idempotencyKey,
+        });
+      }
+    } else {
+      await chatwootClient.sendMessage({
+        conversationId,
+        content: summaryText,
+        private: true, // Internal note
+      });
+    }
+
+    // The private note is idempotent, so a retry can safely repair labels that
+    // failed after the note was accepted. Do not mark the durable handoff as
+    // active while the Chatwoot classification is only partially applied.
+    if (failedLabels.length > 0) {
+      throw new Error(`Chatwoot handoff labels were not reconciled: ${failedLabels.join(',')}`);
+    }
 
     logger.info('Handoff executed in Chatwoot', {
       conversationId: String(conversationId),

@@ -52,6 +52,106 @@ CREATE INDEX idx_messages_created_at ON messages(tenant_id, created_at);
 CREATE UNIQUE INDEX uk_messages_conversation_chatwoot_message
     ON messages(tenant_id, conversation_id, chatwoot_message_id);
 
+-- Durable inbound/outbound delivery state is added by the idempotent migration
+-- 20260807_durable_delivery_pipeline.sql. Keeping the base schema in sync makes
+-- fresh local databases usable before the migration runner is invoked.
+CREATE TABLE IF NOT EXISTS inbound_receipts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id BIGINT NOT NULL,
+    delivery_id VARCHAR(64) NOT NULL,
+    event_type VARCHAR(64) NOT NULL,
+    chatwoot_conversation_id BIGINT,
+    chatwoot_message_id BIGINT,
+    source_created_at TIMESTAMPTZ,
+    correlation_id VARCHAR(128) NOT NULL,
+    payload JSONB NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'accepted',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    available_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processing_owner VARCHAR(128),
+    processing_until TIMESTAMPTZ,
+    last_actor VARCHAR(128),
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed_at TIMESTAMPTZ,
+    CHECK (status IN ('accepted', 'queued', 'processing', 'retry', 'processed', 'dead_letter')),
+    UNIQUE (tenant_id, delivery_id),
+    UNIQUE (tenant_id, id)
+);
+CREATE UNIQUE INDEX uk_inbound_receipts_tenant_message
+    ON inbound_receipts(tenant_id, chatwoot_message_id)
+    WHERE chatwoot_message_id IS NOT NULL;
+CREATE INDEX idx_inbound_receipts_recovery
+    ON inbound_receipts(tenant_id, status, available_at, created_at);
+CREATE INDEX idx_inbound_receipts_conversation_order
+    ON inbound_receipts(tenant_id, chatwoot_conversation_id, source_created_at, created_at)
+    WHERE source_created_at IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS response_outbox (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    tenant_id BIGINT NOT NULL,
+    conversation_id UUID NOT NULL,
+    chatwoot_conversation_id BIGINT NOT NULL,
+    inbound_chatwoot_message_id BIGINT NOT NULL,
+    correlation_id VARCHAR(128),
+    idempotency_key VARCHAR(200) NOT NULL,
+    content TEXT NOT NULL,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    lock_owner VARCHAR(128),
+    lock_until TIMESTAMPTZ,
+    last_actor VARCHAR(128),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    chatwoot_message_id BIGINT,
+    last_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    sent_at TIMESTAMPTZ,
+    CHECK (status IN ('pending', 'sending', 'sent', 'unknown', 'failed', 'reconciled')),
+    UNIQUE (tenant_id, idempotency_key),
+    UNIQUE (tenant_id, conversation_id, inbound_chatwoot_message_id),
+    FOREIGN KEY (tenant_id, conversation_id)
+        REFERENCES conversations(tenant_id, id) ON DELETE CASCADE
+);
+CREATE INDEX idx_response_outbox_recovery
+    ON response_outbox(tenant_id, status, lock_until, updated_at);
+
+CREATE TABLE IF NOT EXISTS conversation_control_state (
+    tenant_id BIGINT NOT NULL,
+    conversation_id UUID NOT NULL,
+    state VARCHAR(24) NOT NULL DEFAULT 'automated',
+    handoff_until TIMESTAMPTZ,
+    handoff_expired_at TIMESTAMPTZ,
+    handoff_reason VARCHAR(500),
+    handoff_owner VARCHAR(128),
+    version BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, conversation_id),
+    CHECK (state IN ('automated', 'handoff_pending', 'handoff_active', 'completed')),
+    FOREIGN KEY (tenant_id, conversation_id)
+        REFERENCES conversations(tenant_id, id) ON DELETE CASCADE
+);
+CREATE INDEX idx_conversation_control_handoff
+    ON conversation_control_state(tenant_id, state, handoff_until);
+
+-- Scheduling state is operational state, not a Redis-only cache. PostgreSQL is
+-- authoritative so Redis loss cannot reopen or corrupt an appointment flow.
+CREATE TABLE IF NOT EXISTS conversation_scheduling_state (
+    tenant_id BIGINT NOT NULL,
+    conversation_id UUID NOT NULL,
+    state JSONB NOT NULL DEFAULT '{}'::JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, conversation_id),
+    CONSTRAINT conversation_scheduling_state_object
+        CHECK (jsonb_typeof(state) = 'object'),
+    FOREIGN KEY (tenant_id, conversation_id)
+        REFERENCES conversations(tenant_id, id) ON DELETE CASCADE
+);
+CREATE INDEX idx_conversation_scheduling_state_updated
+    ON conversation_scheduling_state(tenant_id, updated_at);
+
 -- Audit log table
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -75,6 +175,26 @@ BEGIN
     RETURN NEW;
 END;
 $$ language 'plpgsql';
+
+CREATE TRIGGER update_inbound_receipts_updated_at
+    BEFORE UPDATE ON inbound_receipts
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_response_outbox_updated_at
+    BEFORE UPDATE ON response_outbox
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_conversation_control_updated_at
+    BEFORE UPDATE ON conversation_control_state
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+CREATE TRIGGER update_conversation_scheduling_state_updated_at
+    BEFORE UPDATE ON conversation_scheduling_state
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
 
 -- Trigger to update updated_at on conversations
 CREATE TRIGGER update_conversations_updated_at
@@ -211,6 +331,10 @@ ALTER TABLE messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE contacts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE pets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE customer_memories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE inbound_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE response_outbox ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_control_state ENABLE ROW LEVEL SECURITY;
+ALTER TABLE conversation_scheduling_state ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY tenant_isolation ON conversations
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
@@ -225,6 +349,18 @@ CREATE POLICY tenant_isolation ON pets
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
     WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT);
 CREATE POLICY tenant_isolation ON customer_memories
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT);
+CREATE POLICY tenant_isolation ON inbound_receipts
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT);
+CREATE POLICY tenant_isolation ON response_outbox
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT);
+CREATE POLICY tenant_isolation ON conversation_control_state
+    USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
+    WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT);
+CREATE POLICY tenant_isolation ON conversation_scheduling_state
     USING (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT)
     WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::BIGINT);
 
@@ -276,6 +412,9 @@ CREATE TABLE IF NOT EXISTS tool_executions (
     error_message TEXT,
     duration_ms INTEGER,
     retry_count INTEGER DEFAULT 0,
+    idempotency_key VARCHAR(200),
+    reconciled_by VARCHAR(128),
+    reconciled_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     FOREIGN KEY (tenant_id, conversation_id)
         REFERENCES conversations(tenant_id, id) ON DELETE SET NULL (conversation_id),
@@ -288,6 +427,9 @@ CREATE INDEX idx_tool_executions_contact_id ON tool_executions(tenant_id, contac
 CREATE INDEX idx_tool_executions_tool_name ON tool_executions(tenant_id, tool_name);
 CREATE INDEX idx_tool_executions_status ON tool_executions(tenant_id, status);
 CREATE INDEX idx_tool_executions_created_at ON tool_executions(tenant_id, created_at);
+CREATE UNIQUE INDEX uk_tool_executions_tenant_idempotency
+    ON tool_executions(tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 -- ============================================================================
 -- Phase 2: Handoffs and Sector Notifications
@@ -310,7 +452,8 @@ CREATE TABLE IF NOT EXISTS handoffs (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     completed_at TIMESTAMP WITH TIME ZONE,
     resolved_by VARCHAR(255),
-    resolution_notes TEXT
+    resolution_notes TEXT,
+    idempotency_key VARCHAR(200)
 );
 
 CREATE INDEX idx_handoffs_conversation_id ON handoffs(tenant_id, conversation_id);
@@ -318,6 +461,9 @@ CREATE INDEX idx_handoffs_contact_id ON handoffs(tenant_id, contact_id);
 CREATE INDEX idx_handoffs_status ON handoffs(tenant_id, status);
 CREATE INDEX idx_handoffs_priority ON handoffs(tenant_id, priority);
 CREATE INDEX idx_handoffs_created_at ON handoffs(tenant_id, created_at);
+CREATE UNIQUE INDEX uk_handoffs_tenant_idempotency
+    ON handoffs(tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS sector_notifications (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),

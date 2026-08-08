@@ -27,6 +27,12 @@ groups:
         expr: histogram_quantile(0.95, sum without(instance, pod) (rate(analytics_response_duration_seconds_bucket[5m])))
       - record: cvg:webhook_dlq_increase:5m
         expr: sum without(instance, pod) (increase(webhook_dlq_total[5m]))
+      - record: cvg:response_outbox_unknown_increase:10m
+        expr: sum without(instance, pod) (increase(response_outbox_unknown_total[10m]))
+      - record: cvg:handoff_failure_increase:10m
+        expr: sum without(instance, pod, outcome) (increase(handoff_failures_total[10m]))
+      - record: cvg:context_version_conflict_increase:10m
+        expr: sum without(instance, pod) (increase(context_version_conflicts_total[10m]))
 
       - record: cvg:ai_provider_error_ratio:rate5m
         expr: (sum without(instance, pod) (rate(openai_requests_errors[5m])) + sum without(instance, pod) (rate(openrouter_requests_errors[5m]))) / clamp_min(sum without(instance, pod) (rate(openai_requests_total[5m])) + sum without(instance, pod) (rate(openrouter_requests_total[5m])), 0.001)

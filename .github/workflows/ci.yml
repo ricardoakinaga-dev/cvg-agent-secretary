@@ -49,6 +49,9 @@ jobs:
       - name: Generate application SBOM
         run: npm run --silent sbom > sbom.cdx.json
 
+      - name: Scan generated application artifacts for sensitive data
+        run: npm run security:scan-artifacts -- .env.example sbom.cdx.json
+
       - name: Upload application SBOM
         uses: actions/upload-artifact@v4
         with:
@@ -63,12 +66,20 @@ jobs:
         run: >-
           node -e "const fs=require('fs');const YAML=require('yaml');
           for(const file of [
+          '.github/workflows/ci.yml',
+          '.github/workflows/staging-smoke.yml',
           'deploy/monitoring/prometheus-alerts.yml',
           'deploy/monitoring/prometheus-recording-rules.yml',
           'deploy/monitoring/prometheus-scrape.example.yml',
           'deploy/monitoring/prometheus-slo-rules.yml',
           'deploy/monitoring/prometheus-rules.test.yml'])
           YAML.parse(fs.readFileSync(file,'utf8'))"
+
+      - name: Validate repository review controls
+        run: |
+          test -s .github/CODEOWNERS
+          test -s .github/pull_request_template.md
+          git diff --check
 
       - name: Validate Prometheus rules and alert firing tests
         run: |
@@ -115,6 +126,9 @@ jobs:
           image-ref: cvg-secretary-agent:test
           format: cyclonedx
           output: image-sbom.cdx.json
+
+      - name: Scan generated image artifacts for sensitive data
+        run: npm run security:scan-artifacts -- image-sbom.cdx.json
 
       - name: Scan image for high and critical vulnerabilities
         uses: aquasecurity/trivy-action@0.33.1

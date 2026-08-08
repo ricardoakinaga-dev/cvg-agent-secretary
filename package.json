@@ -20,7 +20,8 @@
     "sbom": "npm sbom --sbom-format cyclonedx",
     "smoke:staging": "ts-node src/scripts/staging-smoke.ts",
     "smoke:evolution": "ts-node src/scripts/evolution-smoke.ts",
-    "smoke:full-flow": "ts-node src/scripts/full-flow-smoke.ts"
+    "smoke:full-flow": "ts-node src/scripts/full-flow-smoke.ts",
+    "security:scan-artifacts": "node scripts/scan-sensitive-artifacts.mjs"
   },
   "dependencies": {
     "crypto-js": "^4.2.0",

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS handoffs (
     -- Resolution
     resolved_by VARCHAR(50),  -- Agent ID who resolved
     resolution_notes TEXT,
+    idempotency_key VARCHAR(200),
     FOREIGN KEY (tenant_id, conversation_id)
         REFERENCES conversations(tenant_id, id) ON DELETE CASCADE,
     FOREIGN KEY (tenant_id, contact_id)
@@ -45,6 +46,9 @@ CREATE INDEX idx_handoffs_status ON handoffs(tenant_id, status);
 CREATE INDEX idx_handoffs_priority ON handoffs(tenant_id, priority);
 CREATE INDEX idx_handoffs_trigger_type ON handoffs(tenant_id, trigger_type);
 CREATE INDEX idx_handoffs_created_at ON handoffs(tenant_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_handoffs_tenant_idempotency
+    ON handoffs(tenant_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 -- ============================================================================
 -- Phase 4: Operational Rules (for get_operational_rules tool)

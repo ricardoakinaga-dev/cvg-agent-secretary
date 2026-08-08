@@ -147,4 +147,57 @@ describe('conversation repository', () => {
       updatedAt: '2026-08-02T00:00:00.000Z',
     })).rejects.toThrow('Conversation not found');
   });
+
+  it('persists a tenant-scoped automation control state with handoff metadata', async () => {
+    const updatedAt = new Date('2026-08-08T00:00:00.000Z');
+    mockQuery.mockResolvedValue({
+      rows: [{
+        conversation_id: 'persisted-conversation-1',
+        state: 'handoff_pending',
+        handoff_until: new Date('2026-08-08T00:10:00.000Z'),
+        handoff_reason: 'Risco clínico',
+        handoff_owner: 'operator-1',
+        version: '3',
+        updated_at: updatedAt,
+      }],
+    });
+    const repository = new ConversationRepository();
+
+    const control = await repository.setControlState('persisted-conversation-1', 'handoff_pending', {
+      handoffUntil: new Date('2026-08-08T00:10:00.000Z'),
+      handoffReason: 'Risco clínico',
+      handoffOwner: 'operator-1',
+    });
+
+    expect(mockQuery).toHaveBeenCalledWith(
+      expect.stringContaining('ON CONFLICT (tenant_id, conversation_id) DO UPDATE'),
+      ['1', 'persisted-conversation-1', 'handoff_pending', new Date('2026-08-08T00:10:00.000Z'), null, 'Risco clínico', 'operator-1', null]
+    );
+    expect(control).toEqual(expect.objectContaining({
+      state: 'handoff_pending',
+      handoffOwner: 'operator-1',
+      version: 3,
+    }));
+  });
+
+  it('reads the durable control state after a Redis miss', async () => {
+    mockQuery.mockResolvedValue({
+      rows: [{
+        conversation_id: 'persisted-conversation-1',
+        state: 'handoff_active',
+        handoff_until: null,
+        handoff_reason: 'Humano solicitado',
+        handoff_owner: null,
+        version: '4',
+        updated_at: new Date('2026-08-08T00:00:00.000Z'),
+      }],
+    });
+    const repository = new ConversationRepository();
+
+    await expect(repository.getControlState('persisted-conversation-1')).resolves.toEqual(expect.objectContaining({
+      conversationId: 'persisted-conversation-1',
+      state: 'handoff_active',
+      version: 4,
+    }));
+  });
 });

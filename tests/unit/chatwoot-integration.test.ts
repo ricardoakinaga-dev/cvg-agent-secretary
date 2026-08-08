@@ -104,13 +104,14 @@ describe('chatwoot integration', () => {
     });
   });
 
-  it('continues handoff when adding one label fails', async () => {
+  it('keeps the handoff pending when a label fails so a retry can repair it', async () => {
     mockChatwootClient.addLabel
       .mockRejectedValueOnce(new Error('label failed'))
       .mockResolvedValueOnce(undefined);
     mockChatwootClient.sendMessage.mockResolvedValue({ id: 1 });
 
-    await executeHandoff(42, summary, [HANDOFF_LABELS.ESCALATED]);
+    await expect(executeHandoff(42, summary, [HANDOFF_LABELS.ESCALATED]))
+      .rejects.toThrow('labels were not reconciled');
 
     expect(mockChatwootClient.addLabel).toHaveBeenCalledTimes(2);
     expect(mockChatwootClient.sendMessage).toHaveBeenCalledWith(
@@ -123,6 +124,32 @@ describe('chatwoot integration', () => {
     mockChatwootClient.sendMessage.mockRejectedValue(new Error('send failed'));
 
     await expect(executeHandoff(42, summary)).rejects.toThrow('send failed');
+  });
+
+  it('reconciles an idempotent private note before creating a second one', async () => {
+    const idempotentClient = mockChatwootClient as typeof mockChatwootClient & {
+      ensureLabel: ReturnType<typeof vi.fn>;
+      findMessageByIdempotencyKey: ReturnType<typeof vi.fn>;
+      sendMessageWithIdempotency: ReturnType<typeof vi.fn>;
+    };
+    idempotentClient.ensureLabel = vi.fn().mockResolvedValue(undefined);
+    idempotentClient.findMessageByIdempotencyKey = vi.fn().mockResolvedValue({ id: 900 });
+    idempotentClient.sendMessageWithIdempotency = vi.fn();
+
+    await executeHandoff(42, {
+      ...summary,
+      idempotencyKey: 'cvg:handoff-note:conversation-1:100',
+    });
+
+    expect(idempotentClient.ensureLabel).toHaveBeenCalledWith(42, HANDOFF_LABELS.HANDOFF);
+    expect(idempotentClient.findMessageByIdempotencyKey).toHaveBeenCalledWith(
+      42,
+      'cvg:handoff-note:conversation-1:100',
+      expect.stringContaining('Maria'),
+      expect.any(Date),
+      { private: true }
+    );
+    expect(idempotentClient.sendMessageWithIdempotency).not.toHaveBeenCalled();
   });
 
   it('creates tutor-facing transfer and waiting messages', () => {

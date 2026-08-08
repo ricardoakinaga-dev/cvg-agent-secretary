@@ -94,6 +94,70 @@ Decisoes tecnicas implementadas em 02/08/2026. A aprovacao executiva, de privaci
 
 **Evidencia:** migration `20260802_z_audit_outbox.sql`, `modules/audit/service.ts` e testes `audit-outbox` com PostgreSQL real.
 
+## ADR-010 - Entrega externa duravel e reconciliavel
+
+**Decisao:** cada webhook aceito gera um `inbound_receipt` duravel e cada resposta automatica gera um `response_outbox` antes do POST ao Chatwoot. A chave logica combina tenant, conversa Chatwoot e mensagem inbound. O envio inclui uma marca `cvg_idempotency_key`; estados `unknown` nao fazem novo POST automaticamente e precisam de consulta automatica ou confirmacao autenticada no Chatwoot.
+
+**Consequencias:** uma falha depois do aceite externo nao e tratada como falha limpa; ela permanece visivel para reconciliacao. O worker pode repetir o turno sem repetir o efeito externo, e o webhook de saida pode reconciliar a intencao mesmo quando o processo caiu antes de gravar o ID local.
+
+**Evidencia:** `src/modules/webhook/inboxRepository.ts`, `src/modules/runtime/responseOutboxRepository.ts`, `src/modules/runtime/messageDelivery.ts`, `src/modules/runtime/responseAdminRoutes.ts`, migration `20260807_durable_delivery_pipeline.sql` e testes de crash/reconciliacao.
+
+## ADR-011 - Handoff fail-closed com controle duravel
+
+**Decisao:** PostgreSQL e a fonte de verdade do bloqueio de automacao. Handoff e persistido como `pending` antes da resposta, efeitos Chatwoot sao idempotentes e o estado so vira ativo depois da reconciliacao dos efeitos exigidos. Expiracao nao reabre o bot; somente operador autenticado pode retomar, concluir ou cancelar. Transicoes de resolucao usam a versao persistida para rejeitar concorrencia obsoleta.
+
+**Consequencias:** uma falha de Redis, label, nota ou API mantem a conversa bloqueada e recuperavel. A operacao precisa acompanhar alertas de handoff e usar a rota de resolucao com justificativa auditada.
+
+**Evidencia:** `conversation_control_state`, `src/modules/handoff/controlService.ts`, `src/modules/runtime/operationalHandoff.ts`, `src/modules/runtime/humanTakeover.ts`, migration `20260811_handoff_expiration_control.sql` e testes de expiracao, reidratacao e controle.
+
+## ADR-012 - Trava de go-live e reconciliacao de side effects
+
+**Decisao:** uma imagem de producao falha fechada se `AUTONOMOUS_AGENT_ENABLED` e `PRODUCTION_GO_LIVE_APPROVED` nao estiverem explicitamente habilitados. Claims de tools mutaveis sao duraveis; estado pendente/erro exige decisao de confirmacao ou retry por operador admin/manager, com motivo hash e auditoria. Alertas de DLQ, envio desconhecido, handoff falho e conflito de versao sao obrigatorios.
+
+**Consequencias:** ativar o agente autonomo passa a ser uma decisao operacional explicita, e nao um efeito colateral de subir o container. O Compose continua seguro por padrao, e a homologacao deve produzir a evidencia antes de mudar as flags.
+
+**Evidencia:** `src/config/index.ts`, `src/modules/agent-tools/adminRoutes.ts`, `deploy/monitoring/prometheus-alerts.yml`, `deploy/monitoring/grafana-dashboard.json`, migrations `20260809_tool_execution_idempotency.sql`/`20260812_tool_execution_reconciliation.sql` e testes de configuracao/RBAC/alertas.
+
+## ADR-013 - Confirmacao da mensagem Chatwoot e marcador em formatos de webhook
+
+**Decisao:** quando `CHATWOOT_CONFIRM_INBOUND_MESSAGES=true`, o worker consulta o Chatwoot pelo `chatwootConversationId` e `chatwootMessageId` antes de executar o turno e rejeita a confirmacao se o registro nao for publico e incoming. O normalizador e o inbox preservam `content_attributes.cvg_idempotency_key` tanto no payload aninhado quanto no formato flat emitido por algumas versoes do Chatwoot. A reconciliacao automatica de resposta usa o marcador; igualdade de conteudo permanece somente fallback de desenvolvimento e e proibida em producao.
+
+**Alternativas rejeitadas:** confiar apenas no corpo assinado sem consulta quando o modo estrito esta ativo; identificar resposta por texto igual; descartar atributos flat por nao estarem em `message`.
+
+**Consequencias:** o staging pode provar a existencia da mensagem antes do processamento e aguardar a resposta marcada; o ambiente alvo precisa aceitar a latencia/capacidade da consulta e registrar o contrato real do webhook. Falha da consulta mantém o evento recuperavel na fila/DLQ e nao libera IA ou tools.
+
+**Evidencia:** `src/modules/webhook/worker.ts`, `src/modules/chatwoot/normalizer.ts`, `src/modules/validation/schemas.ts`, `src/modules/readiness/stagingSmoke.ts`, testes `webhook-worker`, `human-takeover-persistence`, `chatwoot-client` e `staging-smoke`.
+
+## ADR-014 - Smoke externo sem falso positivo de atendimento
+
+**Decisao:** o smoke básico valida somente liveness, readiness e aceite `202`. A validação do atendimento Chatwoot exige configurar `CHATWOOT_API_URL`, `CHATWOOT_API_TOKEN` e `SMOKE_CHATWOOT_MESSAGE_ID`; nesse modo o teste confirma o inbound real antes de enviar o webhook e aguarda uma mensagem outgoing com a chave lógica do turno. O fluxo WhatsApp/EvolutionAPI continua separado e exige execução real no staging.
+
+**Alternativas rejeitadas:** tratar `202` como resposta final; gerar um ID sintético e declarar E2E; consultar conteúdo sem marcador como prova de entrega.
+
+**Consequencias:** o resultado do smoke explicita a etapa que falhou e não submete evento sintético quando a mensagem real não foi encontrada. A validação ainda não prova a entrega final no WhatsApp sem a etapa EvolutionAPI/WhatsApp.
+
+**Evidencia:** `src/modules/readiness/stagingSmoke.ts`, `.github/workflows/staging-smoke.yml`, `tests/unit/staging-smoke.test.ts` e `docs/61_final_whatsapp_e2e_validation.md`.
+
+## ADR-015 - Estado de agendamento duravel fora do Redis
+
+**Decisao:** `conversation_scheduling_state` e a fonte autoritativa do fluxo de agenda, com chave composta por tenant e conversa, RLS e timestamp controlado pelo PostgreSQL. Redis permanece somente como cache; um estado legado encontrado no cache precisa ser persistido antes de influenciar qualquer confirmacao ou cancelamento.
+
+**Alternativas rejeitadas:** manter agenda somente em Redis; continuar a executar confirmacao com cache stale; ignorar estado legado sem migracao controlada.
+
+**Consequencias:** perda ou restart do Redis nao apaga a etapa da agenda, mas a migration `20260813_durable_scheduling_state.sql` passa a ser obrigatoria antes do worker. Privacidade deve incluir exportacao, anonimizacao e eliminacao do novo recurso.
+
+**Evidencia:** `src/modules/scheduling/stateRepository.ts`, `src/modules/scheduling/state.ts`, `database/schema.sql`, migration `20260813_durable_scheduling_state.sql`, `tests/unit/scheduling-state*.test.ts` e adapters de privacidade.
+
+## ADR-016 - Identidade estrita para respostas e takeover humano
+
+**Decisao:** reconciliacao de resposta exige mensagem outgoing publica e marcador `cvg_idempotency_key` em producao. Confirmacao administrativa aplica o mesmo filtro. O fallback por conteudo e permitido somente fora de producao mediante flags explicitas; takeover humano nao pode tratar texto igual como identidade do bot quando o modo estrito esta ativo.
+
+**Alternativas rejeitadas:** aceitar mensagem incoming/private por texto igual; confirmar manualmente qualquer outgoing com o mesmo conteudo; usar hash de conteudo como prova de autoria do bot.
+
+**Consequencias:** ambientes sem marcador real ficam bloqueados para reconciliacao automatica e exigem contrato Chatwoot aprovado ou intervencao operacional auditada. A compatibilidade de desenvolvimento continua disponivel, mas e rejeitada pela validacao de producao.
+
+**Evidencia:** `src/modules/chatwoot/client.ts`, `src/modules/runtime/responseAdminRoutes.ts`, `src/modules/runtime/humanTakeover.ts`, `src/config/index.ts`, testes de cliente/admin/takeover e variaveis `CHATWOOT_ALLOW_CONTENT_*`.
+
 ## Revisao
 
 Qualquer mudanca nestas decisoes deve registrar motivacao, impacto em migracao/rollback, ameaca, PII, testes e aprovadores. Mudancas de tenant, identidade, assinatura ou policy sao bloqueadoras de release.

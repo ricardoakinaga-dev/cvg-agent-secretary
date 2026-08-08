@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 import Redis, { RedisOptions } from 'ioredis';
 import { config } from '../config';
 import { logger } from '../modules/logging';
@@ -117,6 +118,17 @@ class RedisClient {
       serializedJob
     );
     return Number(enqueued) === 1;
+  }
+
+  async enqueueChatwootWebhookReplay(
+    serializedJob: string,
+    receiptId: string,
+    ttlSeconds = 24 * 60 * 60
+  ): Promise<boolean> {
+    const replayDeliveryId = createHash('sha256')
+      .update(`replay.${receiptId}`)
+      .digest('hex');
+    return this.enqueueChatwootWebhookOnce(serializedJob, replayDeliveryId, ttlSeconds);
   }
 
   async claimChatwootWebhook(
@@ -582,6 +594,42 @@ class RedisClient {
     const key = `${REDIS_NAMESPACE}:lock:${resourceId}`;
     const result = await this.getClient().set(key, ownerToken, 'EX', ttlSeconds, 'NX');
     return result === 'OK';
+  }
+
+  async acquireLockWithWait(
+    resourceId: string,
+    ownerToken: string,
+    ttlSeconds = 300,
+    maxWaitMs = 10_000,
+    pollMs = 200
+  ): Promise<boolean> {
+    if (!Number.isSafeInteger(maxWaitMs) || maxWaitMs < 0) {
+      throw new Error('maxWaitMs must be a non-negative integer');
+    }
+    if (!Number.isSafeInteger(pollMs) || pollMs < 1) {
+      throw new Error('pollMs must be a positive integer');
+    }
+    const deadline = Date.now() + maxWaitMs;
+    do {
+      if (await this.acquireLock(resourceId, ownerToken, ttlSeconds)) return true;
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, Math.min(pollMs, deadline - Date.now())));
+    } while (Date.now() <= deadline);
+    return false;
+  }
+
+  async renewLock(resourceId: string, ownerToken: string, ttlSeconds = 300): Promise<boolean> {
+    if (!Number.isSafeInteger(ttlSeconds) || ttlSeconds < 1) {
+      throw new Error('ttlSeconds must be a positive integer');
+    }
+    const key = `${REDIS_NAMESPACE}:lock:${resourceId}`;
+    const result = await this.getClient().eval(`
+      if redis.call('GET', KEYS[1]) ~= ARGV[1] then
+        return 0
+      end
+      return redis.call('EXPIRE', KEYS[1], ARGV[2])
+    `, 1, key, ownerToken, String(ttlSeconds));
+    return Number(result) === 1;
   }
 
   async releaseLock(resourceId: string, ownerToken: string): Promise<boolean> {

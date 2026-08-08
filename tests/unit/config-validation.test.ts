@@ -16,6 +16,7 @@ function restoreConfig(snapshot: AppConfig): void {
   Object.assign(config.auth, snapshot.auth);
   Object.assign(config.conversation, snapshot.conversation);
   Object.assign(config.logging, snapshot.logging);
+  Object.assign(config.privacy, snapshot.privacy);
 }
 
 describe('configuration validation', () => {
@@ -92,11 +93,84 @@ describe('configuration validation', () => {
     expect(result.errors).toContain('CHATWOOT_INBOX_IDS must contain positive comma-separated integers');
   });
 
+  it('requires a valid Chatwoot URL and TLS for production transport', () => {
+    config.chatwoot.apiUrl = 'not-a-url';
+    expect(validateConfig().errors).toContain('CHATWOOT_API_URL must be a valid http(s) URL');
+
+    config.chatwoot.apiUrl = 'http://chatwoot.internal';
+    config.isProduction = true;
+    config.database.allowInsecurePrivateNetwork = false;
+    expect(validateConfig().errors).toContain('CHATWOOT_API_URL must use HTTPS in production');
+  });
+
+  it('allows Chatwoot HTTP only when the private-network exception is explicit', () => {
+    config.chatwoot.apiUrl = 'http://chatwoot.internal';
+    config.isProduction = true;
+    config.database.allowInsecurePrivateNetwork = true;
+
+    expect(validateConfig().errors).not.toContain('CHATWOOT_API_URL must use HTTPS in production');
+  });
+
   it('requires webhook verification outside production too', () => {
     config.isProduction = false;
     config.chatwoot.webhookSecret = '';
 
     expect(validateConfig().errors).toContain('CHATWOOT_WEBHOOK_SECRET is required');
+  });
+
+  it('fails closed in production until the autonomous go-live gate is explicitly approved', () => {
+    config.isProduction = true;
+    config.autonomousAgentEnabled = false;
+    config.productionGoLiveApproved = false;
+
+    const errors = validateConfig().errors;
+
+    expect(errors).toContain(
+      'AUTONOMOUS_AGENT_ENABLED must be true in production after the go-live gate is approved'
+    );
+  });
+
+  it('requires explicit go-live approval when autonomous processing is enabled', () => {
+    config.isProduction = true;
+    config.autonomousAgentEnabled = true;
+    config.productionGoLiveApproved = false;
+
+    expect(validateConfig().errors).toContain(
+      'PRODUCTION_GO_LIVE_APPROVED must be true when autonomous agent is enabled'
+    );
+  });
+
+  it('rejects content-only response reconciliation in production', () => {
+    config.isProduction = true;
+    config.chatwoot.allowContentReconciliationFallback = true;
+
+    expect(validateConfig().errors).toContain(
+      'CHATWOOT_ALLOW_CONTENT_RECONCILIATION_FALLBACK must be false in production'
+    );
+  });
+
+  it('rejects content-only human takeover detection in production', () => {
+    config.isProduction = true;
+    config.chatwoot.allowContentTakeoverFallback = true;
+
+    expect(validateConfig().errors).toContain(
+      'CHATWOOT_ALLOW_CONTENT_TAKEOVER_FALLBACK must be false in production'
+    );
+  });
+
+  it('accepts the autonomous gate flags when both are explicitly enabled', () => {
+    config.isProduction = true;
+    config.autonomousAgentEnabled = true;
+    config.productionGoLiveApproved = true;
+
+    const errors = validateConfig().errors;
+
+    expect(errors).not.toContain(
+      'AUTONOMOUS_AGENT_ENABLED must be true in production after the go-live gate is approved'
+    );
+    expect(errors).not.toContain(
+      'PRODUCTION_GO_LIVE_APPROVED must be true when autonomous agent is enabled'
+    );
   });
 
   it('rejects privileged database credentials in production', () => {

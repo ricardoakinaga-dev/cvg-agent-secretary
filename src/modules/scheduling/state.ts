@@ -2,26 +2,15 @@ import { redisClient } from '../../shared/redis';
 import { config } from '../../config';
 import { logger } from '../logging';
 import { confirmAppointment } from './tools';
+import { toolExecutionRepository } from '../agent-tools/executionRepository';
+import {
+  schedulingStateRepository,
+  SchedulingConversationState,
+  SchedulingConversationStateInput,
+  SchedulingStage,
+} from './stateRepository';
 
-export type SchedulingStage =
-  | 'idle'
-  | 'collecting_details'
-  | 'checking_availability'
-  | 'waiting_slot_confirmation'
-  | 'reserved'
-  | 'confirmed'
-  | 'cancelled';
-
-export interface SchedulingConversationState {
-  stage: SchedulingStage;
-  appointmentId?: string;
-  slotId?: string;
-  serviceId?: string;
-  petName?: string;
-  contactId?: string;
-  lastIntent?: string;
-  updatedAt: string;
-}
+export type { SchedulingConversationState, SchedulingStage } from './stateRepository';
 
 export interface SchedulingStateMachineResult {
   handled: boolean;
@@ -39,9 +28,18 @@ function keyForConversation(conversationId: string): string {
 export async function getSchedulingState(
   conversationId: string
 ): Promise<SchedulingConversationState | null> {
+  // PostgreSQL is authoritative. Redis is retained only as a short-lived cache
+  // and as a one-time compatibility source for states created before the
+  // durable scheduling table existed.
+  const durable = await schedulingStateRepository.get(conversationId);
+  if (durable) {
+    await cacheSchedulingState(conversationId, durable);
+    return durable;
+  }
+
+  let data: string | null;
   try {
-    const data = await redisClient.getClient().get(keyForConversation(conversationId));
-    return data ? JSON.parse(data) as SchedulingConversationState : null;
+    data = await redisClient.getClient().get(keyForConversation(conversationId));
   } catch (error) {
     logger.warn('Failed to read scheduling state', {
       conversationId,
@@ -49,22 +47,53 @@ export async function getSchedulingState(
     });
     return null;
   }
+  if (!data) return null;
+
+  let legacy: SchedulingConversationState;
+  try {
+    legacy = JSON.parse(data) as SchedulingConversationState;
+  } catch (error) {
+    logger.warn('Failed to parse legacy scheduling state', {
+      conversationId,
+      error: (error as Error).message,
+    });
+    return null;
+  }
+
+  // A legacy cache hit must be durably migrated before it can influence a
+  // scheduling decision. Database failure therefore propagates to the worker.
+  const migrated = await schedulingStateRepository.upsert(conversationId, {
+    stage: legacy.stage,
+    appointmentId: legacy.appointmentId,
+    slotId: legacy.slotId,
+    serviceId: legacy.serviceId,
+    petName: legacy.petName,
+    contactId: legacy.contactId,
+    lastIntent: legacy.lastIntent,
+  });
+  await cacheSchedulingState(conversationId, migrated);
+  return migrated;
 }
 
 export async function setSchedulingState(
   conversationId: string,
-  state: Omit<SchedulingConversationState, 'updatedAt'>,
+  state: SchedulingConversationStateInput,
+  ttlSeconds = DEFAULT_TTL_SECONDS
+): Promise<void> {
+  const persisted = await schedulingStateRepository.upsert(conversationId, state);
+  await cacheSchedulingState(conversationId, persisted, ttlSeconds);
+}
+
+async function cacheSchedulingState(
+  conversationId: string,
+  state: SchedulingConversationState,
   ttlSeconds = DEFAULT_TTL_SECONDS
 ): Promise<void> {
   try {
-    const nextState: SchedulingConversationState = {
-      ...state,
-      updatedAt: new Date().toISOString(),
-    };
     await redisClient.getClient().setex(
       keyForConversation(conversationId),
       ttlSeconds,
-      JSON.stringify(nextState)
+      JSON.stringify(state)
     );
   } catch (error) {
     logger.warn('Failed to write scheduling state', {
@@ -122,7 +151,8 @@ function isNegativeConfirmation(message: string): boolean {
 
 export async function handleSchedulingStateMachine(
   conversationId: string,
-  message: string
+  message: string,
+  turnId?: string
 ): Promise<SchedulingStateMachineResult> {
   const state = await getSchedulingState(conversationId);
 
@@ -144,18 +174,52 @@ export async function handleSchedulingStateMachine(
       };
     }
 
+    const executionKey = turnId ? `scheduling-confirm:${conversationId}:${turnId}` : null;
+    const claim = executionKey
+      ? await toolExecutionRepository.claim({
+          conversationId,
+          contactId: state.contactId,
+          toolName: 'scheduling_confirm',
+          toolInput: { appointmentId: state.appointmentId, message },
+          idempotencyKey: executionKey,
+        })
+      : null;
+    if (claim?.state === 'completed') return claim.output as SchedulingStateMachineResult;
+    if (claim?.state === 'pending') {
+      return {
+        handled: true,
+        stage: 'waiting_slot_confirmation',
+        appointmentId: state.appointmentId,
+        message: 'A confirmacao deste horario esta sendo reconciliada por um atendente. Aguarde um momento, por favor.',
+      };
+    }
+
     const result = await confirmAppointment({
       appointmentId: state.appointmentId,
       conversationId,
       contactId: state.contactId,
     });
     if (!result.success || !result.appointment) {
-      return {
+      const response: SchedulingStateMachineResult = {
         handled: true,
         stage: 'waiting_slot_confirmation',
         appointmentId: state.appointmentId,
         message: 'Nao consegui confirmar esse horario automaticamente. Vou chamar um atendente para verificar para voce.',
       };
+      if (claim?.state === 'claimed') {
+        await toolExecutionRepository.complete(claim.id, response, 0);
+      }
+      return response;
+    }
+
+    const response: SchedulingStateMachineResult = {
+      handled: true,
+      stage: 'confirmed',
+      appointmentId: result.appointment.id,
+      message: 'Horario confirmado com sucesso. Se precisar alterar alguma informacao, posso te ajudar por aqui.',
+    };
+    if (claim?.state === 'claimed') {
+      await toolExecutionRepository.complete(claim.id, response, 0);
     }
 
     await setSchedulingState(conversationId, {
@@ -168,12 +232,7 @@ export async function handleSchedulingStateMachine(
       lastIntent: 'agendamento',
     });
 
-    return {
-      handled: true,
-      stage: 'confirmed',
-      appointmentId: result.appointment.id,
-      message: 'Horario confirmado com sucesso. Se precisar alterar alguma informacao, posso te ajudar por aqui.',
-    };
+    return response;
   }
 
   if (isNegativeConfirmation(message)) {

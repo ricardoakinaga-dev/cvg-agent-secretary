@@ -7,6 +7,35 @@ export interface SendMessageParams {
   private?: boolean;
 }
 
+export interface IdempotentSendMessageParams extends SendMessageParams {
+  idempotencyKey: string;
+}
+
+export interface ChatwootMessageLookup {
+  id: number;
+  content?: string;
+  message_type?: 'incoming' | 'outgoing' | 0 | 1;
+  private?: boolean;
+  sender?: { type?: string };
+  content_attributes?: Record<string, unknown>;
+  created_at?: number | string;
+}
+
+export interface IdempotencyLookupOptions {
+  /** Require a private internal note when reconciling a handoff note. */
+  private?: boolean;
+}
+
+export class ChatwootApiError extends Error {
+  constructor(
+    public readonly status: number,
+    statusText: string
+  ) {
+    super(`Chatwoot API error: ${status} ${statusText}`);
+    this.name = 'ChatwootApiError';
+  }
+}
+
 interface LabelsResponse {
   payload?: string[];
   labels?: string[];
@@ -41,10 +70,8 @@ class ChatwootClient {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Chatwoot API error: ${response.status} ${response.statusText} - ${errorText}`
-      );
+      await response.text().catch(() => undefined);
+      throw new ChatwootApiError(response.status, response.statusText);
     }
 
     return response.json() as Promise<T>;
@@ -87,6 +114,99 @@ class ChatwootClient {
   }
 
   /**
+   * Send a response carrying a stable local idempotency marker. Chatwoot does
+   * not provide a native idempotency-key contract for this endpoint, so the
+   * marker is also used by reconciliation after an unknown network result.
+   */
+  async sendMessageWithIdempotency(
+    params: IdempotentSendMessageParams
+  ): Promise<{ id: number }> {
+    const { conversationId, content, private: isPrivate = false, idempotencyKey } = params;
+    if (!/^[a-zA-Z0-9:_-]{1,200}$/.test(idempotencyKey)) {
+      throw new Error('Invalid Chatwoot response idempotency key');
+    }
+
+    logger.info('Sending idempotent message to Chatwoot', {
+      conversationId: String(conversationId),
+      contentLength: content.length,
+      isPrivate,
+    });
+
+    return this.request<{ id: number }>(
+      'POST',
+      `/conversations/${conversationId}/messages`,
+      {
+        content,
+        private: isPrivate,
+        content_attributes: {
+          cvg_idempotency_key: idempotencyKey,
+        },
+      }
+    );
+  }
+
+  /**
+   * Reconcile an external response after a timeout or process interruption.
+   * The metadata marker is authoritative; content matching is a conservative
+   * fallback for Chatwoot versions that do not return content attributes.
+   */
+  async findMessageByIdempotencyKey(
+    conversationId: number,
+    idempotencyKey: string,
+    content: string,
+    createdAfter: Date,
+    options: IdempotencyLookupOptions = {}
+  ): Promise<ChatwootMessageLookup | null> {
+    const result = await this.request<ChatwootMessageLookup[] | { payload?: ChatwootMessageLookup[] }>(
+      'GET',
+      `/conversations/${conversationId}/messages`
+    );
+    const messages = Array.isArray(result) ? result : (result.payload || []);
+    const createdAfterMs = createdAfter.getTime();
+    const expectedPrivate = options.private === true;
+
+    for (const message of messages) {
+      const outgoing = message.message_type === 'outgoing' || message.message_type === 1;
+      const visibilityMatches = expectedPrivate
+        ? message.private === true
+        : message.private !== true;
+      if (!outgoing || !visibilityMatches) continue;
+
+      const marker = message.content_attributes?.cvg_idempotency_key;
+      if (marker === idempotencyKey) return message;
+
+      // Content equality is not an identity guarantee: a client can receive
+      // the same answer twice for different inbound messages. Production must
+      // therefore reconcile only the durable marker written with the intent.
+      if (!config.chatwoot.allowContentReconciliationFallback) continue;
+
+      const createdAt = typeof message.created_at === 'number'
+        ? message.created_at * 1_000
+        : typeof message.created_at === 'string' ? Date.parse(message.created_at) : Number.NaN;
+      if (
+        message.content === content
+        && (!Number.isFinite(createdAt) || createdAt >= createdAfterMs)
+      ) {
+        return message;
+      }
+    }
+
+    return null;
+  }
+
+  async findMessageById(
+    conversationId: number,
+    messageId: number
+  ): Promise<ChatwootMessageLookup | null> {
+    const result = await this.request<ChatwootMessageLookup[] | { payload?: ChatwootMessageLookup[] }>(
+      'GET',
+      `/conversations/${conversationId}/messages`
+    );
+    const messages = Array.isArray(result) ? result : (result.payload || []);
+    return messages.find((message) => message.id === messageId) || null;
+  }
+
+  /**
    * Add a label to a conversation
    */
   async addLabel(conversationId: number, label: string): Promise<void> {
@@ -100,6 +220,16 @@ class ChatwootClient {
       conversationId: String(conversationId),
       label,
     });
+  }
+
+  /**
+   * Adds a label by reading and replacing the complete set. Repeating this
+   * operation therefore converges to one logical label even after a timeout.
+   */
+  async ensureLabel(conversationId: number, label: string): Promise<void> {
+    const labels = await this.listLabels(conversationId);
+    if (labels.includes(label)) return;
+    await this.updateLabels(conversationId, [...labels, label]);
   }
 
   async listLabels(conversationId: number): Promise<string[]> {

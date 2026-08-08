@@ -1,5 +1,15 @@
 const mockRedisStore = vi.hoisted(() => new Map<string, string>());
+const mockDurableStore = vi.hoisted(() => new Map<string, Record<string, unknown>>());
 const mockConfirmAppointment = vi.hoisted(() => vi.fn());
+
+const mockSchedulingRepository = vi.hoisted(() => ({
+  get: vi.fn(async (conversationId: string) => mockDurableStore.get(conversationId) || null),
+  upsert: vi.fn(async (conversationId: string, state: Record<string, unknown>) => {
+    const persisted = { ...state, updatedAt: '2026-08-08T00:00:00.000Z' };
+    mockDurableStore.set(conversationId, persisted);
+    return persisted;
+  }),
+}));
 
 vi.mock('../../src/shared/redis', () => ({
   redisClient: {
@@ -16,6 +26,9 @@ vi.mock('../../src/shared/redis', () => ({
 vi.mock('../../src/modules/scheduling/tools', () => ({
   confirmAppointment: mockConfirmAppointment,
 }));
+vi.mock('../../src/modules/scheduling/stateRepository', () => ({
+  schedulingStateRepository: mockSchedulingRepository,
+}));
 
 import {
   getSchedulingState,
@@ -26,7 +39,10 @@ import {
 describe('scheduling state machine', () => {
   beforeEach(() => {
     mockRedisStore.clear();
+    mockDurableStore.clear();
     mockConfirmAppointment.mockReset();
+    mockSchedulingRepository.get.mockClear();
+    mockSchedulingRepository.upsert.mockClear();
   });
 
   it('confirms a pending appointment deterministically on positive confirmation', async () => {
@@ -59,6 +75,22 @@ describe('scheduling state machine', () => {
     const state = await getSchedulingState('conversation-1');
     expect(state?.stage).toBe('confirmed');
     expect(state?.contactId).toBe('contact-1');
+    expect(mockSchedulingRepository.upsert).toHaveBeenCalled();
+  });
+
+  it('uses the durable state after the Redis cache is lost', async () => {
+    await setSchedulingState('conversation-1', {
+      stage: 'collecting_details',
+      contactId: 'contact-1',
+      lastIntent: 'agendamento',
+    });
+    mockRedisStore.clear();
+
+    await expect(getSchedulingState('conversation-1')).resolves.toEqual(expect.objectContaining({
+      stage: 'collecting_details',
+      contactId: 'contact-1',
+    }));
+    expect(mockSchedulingRepository.get).toHaveBeenCalledWith('conversation-1');
   });
 
   it('asks for another time when the tutor rejects the pending slot', async () => {
